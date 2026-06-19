@@ -1,0 +1,186 @@
+{
+  "app_name": "HealthGuard Compliance",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A trustworthy, highly readable, and professionally structured utility that evokes the stability of modern finance applied to healthcare compliance.",
+  "color": {
+    "surface": "#F9F9F8",
+    "onSurface": "#111412",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#1A1D1B",
+    "surfaceTertiary": "#F1F2F0",
+    "onSurfaceTertiary": "#2E3330",
+    "surfaceInverse": "#111412",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#204231",
+    "brandPrimary": "#204231",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#385A48",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#E3EBE6",
+    "onBrandTertiary": "#163023",
+    "success": "#285C42",
+    "onSuccess": "#FFFFFF",
+    "warning": "#A16922",
+    "onWarning": "#FFFFFF",
+    "error": "#B33A3A",
+    "onError": "#FFFFFF",
+    "info": "#4A5551",
+    "onInfo": "#FFFFFF",
+    "border": "#E3E5E3",
+    "borderStrong": "#BCC2BD",
+    "divider": "#EEF0EE",
+    
+    "dark_surface": "#111312",
+    "dark_onSurface": "#ECEDEC",
+    "dark_surfaceSecondary": "#1C1E1D",
+    "dark_onSurfaceSecondary": "#E1E3E2",
+    "dark_surfaceTertiary": "#252826",
+    "dark_onSurfaceTertiary": "#D0D3D1",
+    "dark_surfaceInverse": "#F9F9F8",
+    "dark_onSurfaceInverse": "#111412",
+    "dark_brand": "#A0C4B0",
+    "dark_brandPrimary": "#A0C4B0",
+    "dark_onBrandPrimary": "#0E2117",
+    "dark_brandSecondary": "#7E9F8E",
+    "dark_onBrandSecondary": "#08160E",
+    "dark_brandTertiary": "#1B3224",
+    "dark_onBrandTertiary": "#BDE6D0",
+    "dark_success": "#438B64",
+    "dark_onSuccess": "#FFFFFF",
+    "dark_warning": "#E09E45",
+    "dark_onWarning": "#0E0902",
+    "dark_error": "#E66565",
+    "dark_onError": "#2B0707",
+    "dark_info": "#8C9C96",
+    "dark_onInfo": "#0D1110",
+    "dark_border": "#2E3330",
+    "dark_borderStrong": "#47504B",
+    "dark_divider": "#232725"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous iOS padding. lg or xl margins at screen roots. Cards must not flush to screen edges. Primary CTA sticky at bottom above safe area. 2-col grids use 'justifyContent: space-between' and wrap.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 1,
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use on bottom tab bar",
+      "Use on sticky headers over scrolling content",
+      "Use on featured dashboard cards overlaid on the architectural hero background"
+    ],
+    "dont's": [
+      "Do not use on generic form fields or basic list items",
+      "Do not use if it breaks contrast (always layer a >70% opacity tint beneath foreground text on glass)"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "AdminDashboard",
+      "purpose": "A commanding overview of agency compliance, showing total stats, audit readiness percentage, and actionable pending tasks.",
+      "states": {
+        "loading": "Centered spinner",
+        "empty": "Not applicable for dashboard",
+        "error": "Card displaying 'Unable to load stats' with retry button"
+      },
+      "layout": "Top portion features a hero image (abstract architecture) with a vertical gradient scrim (transparent to ≥70% surfaceInverse) to guarantee text contrast. Displays an 'Audit Readiness' circular metric. Below the hero: a 2-column grid of modular stat cards (Total Clients, Pending Docs). Further down, an 'Action Required' list view. Bottom CTA floats over content or sits in tab bar."
+    },
+    {
+      "name": "DocumentVault",
+      "purpose": "Securely organize and access folders for Clients, Caregivers, Onboarding, and Training materials.",
+      "states": {
+        "loading": "Skeleton list rows",
+        "empty": "Image illustration of empty folders with text 'No folders found' and primary CTA 'Create Folder'",
+        "error": "Error message with retry button"
+      },
+      "layout": "Standard iOS-native list view. Each row has 56pt height, a leading folder icon inside a brandTertiary tinted rounded square, the folder title, a document count subtitle, and a trailing chevron. Pinned top search/filter bar with a glass background."
+    },
+    {
+      "name": "CaregiverOnboarding",
+      "purpose": "Track step-by-step required documents and training to achieve full compliance.",
+      "states": {
+        "loading": "Skeleton checklist",
+        "empty": "Not applicable once started",
+        "error": "Error message with retry button"
+      },
+      "layout": "Top progress bar indicating completion percentage. Below, a checklist of 5-7 steps. Each row uses a clear visual state: outlined circle for pending, filled success color checkmark for complete. Generous padding between steps. Sticky primary CTA at bottom ('Submit Documents') if action is required."
+    },
+    {
+      "name": "ComplianceAssistant",
+      "purpose": "Chat interface powered by Claude to query compliance status and audit requirements.",
+      "states": {
+        "loading": "Typing indicator bubbles",
+        "empty": "Welcome message with suggested prompts in pill chips",
+        "error": "Failed to send message toast"
+      },
+      "layout": "Chat interface. Input field pinned to keyboard (KeyboardAvoidingView) with a surfaceTertiary background. Message bubbles use brandPrimary (user) and surfaceSecondary (AI). Safe area respected."
+    }
+  ],
+  "images": {
+    "hero_dashboard": {
+      "url": "https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njd8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBjbGVhbiUyMGFic3RyYWN0JTIwYXJjaGl0ZWN0dXJhbCUyMHRleHR1cmUlMjBicmlnaHR8ZW58MHx8fHwxNzgxODkyMjYyfDA&ixlib=rb-4.1.0&q=85",
+      "dark": "https://images.unsplash.com/photo-1498262257252-c282316270bc?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njd8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjbGVhbiUyMGFic3RyYWN0JTIwYXJjaGl0ZWN0dXJhbCUyMHRleHR1cmUlMjBicmlnaHR8ZW58MHx8fHwxNzgxODkyMjYyfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Abstract clean architectural texture for dashboard hero"
+    },
+    "empty_folder": {
+      "url": "https://images.unsplash.com/photo-1544396821-4dd40b938ad3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwxfHxvcmdhbml6ZWQlMjBvZmZpY2UlMjBmaWxlJTIwZm9sZGVycyUyMGNsZWFyJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODE4OTIyNjJ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Organized office file folders"
+    },
+    "caregiver_avatar": {
+      "url": "https://images.unsplash.com/photo-1594824476967-48c8b964273f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBjYXJlZ2l2ZXIlMjBudXJzZSUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MTg5MjI2M3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Professional caregiver nurse portrait"
+    }
+  },
+  "haptics": {
+    "primary_button_press": "impactLight",
+    "tab_switch": "selection",
+    "task_complete": "notificationSuccess",
+    "folder_open": "impactLight"
+  },
+  "instructions_to_main_agent": [
+    "Implement the '1 iOS-Native Clean' personality with a botanical 'Deep Moss Green' and 'Bone White' palette. Avoid any blue, navy, or purple as requested by strict global rules.",
+    "Ensure the AdminDashboard utilizes the 'hero_dashboard' image with a strict gradient scrim (transparent to >70% opacity) layered beneath the Audit Readiness score to guarantee WCAG text contrast.",
+    "For the DocumentVault list, default to using tinted icon containers (brandTertiary rounded squares) for the folder icons to provide a premium, finished look rather than bare icons.",
+    "In CaregiverOnboarding, apply a clear checklist UI layout. Progress tracking is vital for the product's job-to-be-done. Completed steps must visually stand out from pending ones.",
+    "Ensure all primary actions (like 'Submit Documents') use a sticky bottom CTA constrained by safe-area bounds, sitting above the scrolling content with a subtle glass or fade backdrop.",
+    "For avatars, use the caregiver_avatar URL as a primary representation of the user, falling back to initials if necessary, but avoid generic user placeholder icons.",
+    "Do NOT use emojis anywhere in the system UI."
+  ]
+}
