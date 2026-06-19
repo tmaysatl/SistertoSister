@@ -9,7 +9,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet } from "@/src/api/client";
-import { theme, HERO_IMAGE } from "@/src/theme";
+import { theme, HERO_IMAGE, BRAND_NAME, LOGO_URL } from "@/src/theme";
 
 type Stats = {
   total_clients: number;
@@ -63,11 +63,14 @@ export default function Dashboard() {
           />
           <SafeAreaView edges={["top"]} style={styles.heroSafe}>
             <View style={styles.heroHeader}>
-              <View>
-                <Text style={styles.heroGreeting}>
-                  {user?.role === "admin" ? "Agency Owner" : "Caregiver"}
-                </Text>
-                <Text style={styles.heroName}>{user?.name}</Text>
+              <View style={styles.heroBrand}>
+                <Image source={{ uri: LOGO_URL }} style={styles.heroLogo} contentFit="contain" />
+                <View>
+                  <Text style={styles.heroGreeting}>
+                    {user?.role === "admin" ? BRAND_NAME : "Caregiver"}
+                  </Text>
+                  <Text style={styles.heroName}>{user?.name}</Text>
+                </View>
               </View>
               <Pressable testID="logout-button" onPress={logout} style={styles.iconBtn}>
                 <Ionicons name="log-out-outline" size={20} color="#fff" />
@@ -201,6 +204,8 @@ const styles = StyleSheet.create({
   hero: { ...StyleSheet.absoluteFillObject },
   heroSafe: { flex: 1, paddingHorizontal: 20, paddingTop: 8, justifyContent: "space-between" },
   heroHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  heroBrand: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
+  heroLogo: { width: 48, height: 48 },
   heroGreeting: { color: "rgba(255,255,255,0.7)", fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 1 },
   heroName: { color: "#fff", fontSize: 22, fontWeight: "700", marginTop: 2 },
   iconBtn: {

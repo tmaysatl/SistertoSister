@@ -11,7 +11,7 @@ import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { theme } from "@/src/theme";
 
-type DocCategory = "client" | "caregiver" | "onboarding" | "training" | "policy";
+type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
 
 type DocItem = {
   id: string;
@@ -21,15 +21,20 @@ type DocItem = {
   uploaded_at: string;
   file_base64?: string | null;
   mime_type?: string;
+  expires_at?: string | null;
+  seq?: number | null;
+  is_template?: boolean;
+  owner_id?: string | null;
 };
 
 const CATEGORIES: { key: DocCategory | "all"; label: string; icon: any }[] = [
   { key: "all", label: "All", icon: "albums-outline" },
-  { key: "client", label: "Clients", icon: "people-outline" },
-  { key: "caregiver", label: "Caregivers", icon: "medkit-outline" },
-  { key: "onboarding", label: "Onboarding", icon: "clipboard-outline" },
+  { key: "client_onboarding", label: "Client Onboarding", icon: "clipboard-outline" },
+  { key: "caregiver_onboarding", label: "Caregiver Onboarding", icon: "person-add-outline" },
+  { key: "credential", label: "Credentials", icon: "ribbon-outline" },
+  { key: "client", label: "Client Files", icon: "people-outline" },
+  { key: "caregiver", label: "Caregiver Files", icon: "medkit-outline" },
   { key: "training", label: "Training", icon: "school-outline" },
-  { key: "policy", label: "Policies", icon: "shield-checkmark-outline" },
 ];
 
 export default function Documents() {
@@ -40,8 +45,11 @@ export default function Documents() {
   const [showAdd, setShowAdd] = useState(false);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
-  const [category, setCategory] = useState<DocCategory>("policy");
+  const [category, setCategory] = useState<DocCategory>("credential");
   const [pickedFile, setPickedFile] = useState<{ base64: string; mime: string; name: string } | null>(null);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [credTemplates, setCredTemplates] = useState<string[]>([]);
+  const [seeding, setSeeding] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(async () => {
@@ -49,6 +57,10 @@ export default function Documents() {
     try {
       const d = await apiGet<DocItem[]>("/documents");
       setDocs(d);
+      try {
+        const t = await apiGet<{ titles: string[] }>("/credentials/templates");
+        setCredTemplates(t.titles);
+      } catch { /* non-blocking */ }
     } catch (e) {
       console.log(e);
     } finally {
@@ -59,7 +71,10 @@ export default function Documents() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const filtered = useMemo(
-    () => (filter === "all" ? docs : docs.filter((d) => d.category === filter)),
+    () => {
+      const nonPolicy = docs.filter((d) => d.category !== "policy");
+      return filter === "all" ? nonPolicy : nonPolicy.filter((d) => d.category === filter);
+    },
     [docs, filter]
   );
 
@@ -91,21 +106,41 @@ export default function Documents() {
     if (!title.trim()) return;
     setSubmitting(true);
     try {
+      const expiry = expiresAt.trim();
+      const isoExpiry = expiry && /^\d{4}-\d{2}-\d{2}$/.test(expiry)
+        ? new Date(`${expiry}T00:00:00Z`).toISOString()
+        : null;
+      const isCred = category === "credential";
       await apiPost("/documents", {
         title: title.trim(),
         category,
         notes,
-        owner_type: "agency",
+        owner_type: isCred ? "caregiver" : "agency",
+        owner_id: isCred ? user?.id : null,
         file_base64: pickedFile?.base64 || null,
         mime_type: pickedFile?.mime || "application/pdf",
+        expires_at: isoExpiry,
       });
       setShowAdd(false);
-      setTitle(""); setNotes(""); setPickedFile(null); setCategory("policy");
+      setTitle(""); setNotes(""); setPickedFile(null);
+      setExpiresAt(""); setCategory("credential");
       await load();
     } catch (e) {
       console.log(e);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const seedTemplates = async () => {
+    setSeeding(true);
+    try {
+      await apiPost<{ created: number }>("/documents/seed-templates", {});
+      await load();
+    } catch (e) {
+      console.log(e);
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -122,7 +157,29 @@ export default function Documents() {
           <Text style={styles.subtitle}>{docs.length} item{docs.length === 1 ? "" : "s"}</Text>
         </View>
         {user?.role === "admin" && (
-          <Pressable testID="add-document-button" onPress={() => setShowAdd(true)} style={styles.addBtn}>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <Pressable
+              testID="seed-templates-button"
+              onPress={seedTemplates}
+              disabled={seeding}
+              style={styles.seedBtn}
+            >
+              {seeding ? (
+                <ActivityIndicator size="small" color={theme.colors.brandPrimary} />
+              ) : (
+                <>
+                  <Ionicons name="download-outline" size={16} color={theme.colors.brandPrimary} />
+                  <Text style={styles.seedBtnText}>Load Templates</Text>
+                </>
+              )}
+            </Pressable>
+            <Pressable testID="add-document-button" onPress={() => setShowAdd(true)} style={styles.addBtn}>
+              <Ionicons name="add" size={22} color="#fff" />
+            </Pressable>
+          </View>
+        )}
+        {user?.role === "caregiver" && (
+          <Pressable testID="add-document-button" onPress={() => { setCategory("credential"); setShowAdd(true); }} style={styles.addBtn}>
             <Ionicons name="add" size={22} color="#fff" />
           </Pressable>
         )}
@@ -175,29 +232,52 @@ export default function Documents() {
             </View>
           )
         }
-        renderItem={({ item }) => (
-          <View style={styles.docCard} testID={`doc-${item.id}`}>
-            <View style={styles.docIcon}>
-              <Ionicons name="document-text-outline" size={20} color={theme.colors.brandPrimary} />
+        renderItem={({ item }) => {
+          const expiry = item.expires_at ? new Date(item.expires_at) : null;
+          const expSoon =
+            expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
+          const expired = expiry && expiry.getTime() < Date.now();
+          return (
+            <View style={styles.docCard} testID={`doc-${item.id}`}>
+              <View style={styles.docIcon}>
+                <Ionicons
+                  name={item.is_template ? "document-outline" : item.category === "credential" ? "ribbon-outline" : "document-text-outline"}
+                  size={20}
+                  color={theme.colors.brandPrimary}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.docTitle} numberOfLines={1}>{item.title}</Text>
+                <Text style={styles.docMeta}>
+                  {item.category.replace("_", " ").toUpperCase()} · {new Date(item.uploaded_at).toLocaleDateString()}
+                </Text>
+                {!!expiry && (
+                  <View style={[
+                    styles.expBadge,
+                    expired ? { backgroundColor: theme.colors.error } :
+                    expSoon ? { backgroundColor: theme.colors.warning } :
+                    { backgroundColor: theme.colors.success }
+                  ]}>
+                    <Ionicons name="time-outline" size={11} color="#fff" />
+                    <Text style={styles.expBadgeText}>
+                      {expired ? "EXPIRED" : "Expires"} {expiry.toLocaleDateString()}
+                    </Text>
+                  </View>
+                )}
+                {!!item.notes && <Text style={styles.docNotes} numberOfLines={2}>{item.notes}</Text>}
+              </View>
+              {(user?.role === "admin" || item.owner_id === user?.id) && (
+                <Pressable
+                  testID={`delete-doc-${item.id}`}
+                  onPress={() => removeDoc(item.id)}
+                  hitSlop={10}
+                >
+                  <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
+                </Pressable>
+              )}
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.docTitle} numberOfLines={1}>{item.title}</Text>
-              <Text style={styles.docMeta}>
-                {item.category.toUpperCase()} · {new Date(item.uploaded_at).toLocaleDateString()}
-              </Text>
-              {!!item.notes && <Text style={styles.docNotes} numberOfLines={2}>{item.notes}</Text>}
-            </View>
-            {user?.role === "admin" && (
-              <Pressable
-                testID={`delete-doc-${item.id}`}
-                onPress={() => removeDoc(item.id)}
-                hitSlop={10}
-              >
-                <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
-              </Pressable>
-            )}
-          </View>
-        )}
+          );
+        }}
       />
 
       <Modal visible={showAdd} animationType="slide" transparent onRequestClose={() => setShowAdd(false)}>
@@ -221,7 +301,7 @@ export default function Documents() {
 
             <Text style={styles.fieldLabel}>Category</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-              {CATEGORIES.filter((c) => c.key !== "all").map((c) => {
+              {CATEGORIES.filter((c) => c.key !== "all" && (user?.role === "admin" || c.key === "credential")).map((c) => {
                 const active = category === c.key;
                 return (
                   <Pressable
@@ -235,6 +315,39 @@ export default function Documents() {
                 );
               })}
             </ScrollView>
+
+            {category === "credential" && credTemplates.length > 0 && (
+              <>
+                <Text style={styles.fieldLabel}>Suggested credentials</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                  {credTemplates.map((t) => (
+                    <Pressable
+                      key={t}
+                      testID={`cred-suggest-${t.slice(0, 10)}`}
+                      onPress={() => setTitle(t)}
+                      style={[styles.chip, { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brandPrimary }]}
+                    >
+                      <Text style={[styles.chipText, { color: theme.colors.brandPrimary }]}>{t}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+
+            {(category === "credential" || category === "caregiver_onboarding" || category === "client_onboarding") && (
+              <>
+                <Text style={styles.fieldLabel}>Expiration date (YYYY-MM-DD, optional)</Text>
+                <TextInput
+                  testID="doc-expiry-input"
+                  value={expiresAt}
+                  onChangeText={setExpiresAt}
+                  placeholder="2026-12-31"
+                  placeholderTextColor={theme.colors.muted}
+                  autoCapitalize="none"
+                  style={styles.input}
+                />
+              </>
+            )}
 
             <Text style={styles.fieldLabel}>Notes (optional)</Text>
             <TextInput
@@ -273,6 +386,18 @@ const styles = StyleSheet.create({
   title: { fontSize: 26, fontWeight: "700", color: theme.colors.onSurface },
   subtitle: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
   addBtn: { width: 40, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandPrimary, alignItems: "center", justifyContent: "center" },
+  seedBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 12, height: 40, borderRadius: 12,
+    backgroundColor: theme.colors.brandTertiary, borderWidth: 1, borderColor: theme.colors.brandPrimary,
+  },
+  seedBtnText: { color: theme.colors.brandPrimary, fontWeight: "700", fontSize: 12 },
+  expBadge: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999,
+    alignSelf: "flex-start", marginTop: 4,
+  },
+  expBadgeText: { color: "#fff", fontSize: 10, fontWeight: "700", letterSpacing: 0.4 },
   chipsWrap: { height: 56, justifyContent: "center" },
   chipsRow: { paddingHorizontal: 20, gap: 8, alignItems: "center" },
   chip: {

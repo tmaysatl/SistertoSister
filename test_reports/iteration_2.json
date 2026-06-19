@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 2 backend testing — rebrand + onboarding templates + caregiver credential repository. Added /app/backend/tests/test_iteration2_templates_credentials.py with 15 new tests (admin rebrand, seed-templates idempotency + RBAC, client_onboarding=10/caregiver_onboarding=12/policy=10 numbered & sorted by seq ASC, GET /api/credentials/templates, caregiver-created credential persistence, caregiver scoping including templates, GET /api/credentials/expiring filtering & per-role scoping, stats regression). Also updated legacy test_healthguard_api.py::TestDocuments::test_caregiver_scoping to use the new 'caregiver_onboarding' category (the old 'onboarding' literal was removed from DocCategory). Full suite now: 35/35 PASSED against public EXPO_BACKEND_URL. Admin login returns user.name='Sister to Sister, PHCP'. seed-templates is idempotent (2nd call returns created=0). /api/stats schema unchanged. No _id leaking in any Document response.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/documents (caregiver)", "issue": "All caregivers see ALL caregiver_onboarding template docs (intended). Caveat: if a real per-caregiver onboarding *document* (not just OnboardingStep) is ever stored with category='caregiver_onboarding', it would be visible to every caregiver. Recommend that personal/in-progress caregiver onboarding files use category='caregiver' + owner_id scoping, and keep 'caregiver_onboarding' strictly for agency templates."},
+      {"endpoint": "GET /api/credentials/expiring", "issue": "Default days=60 query has no upper bound and no `days<0` validation. Negative or huge values are accepted (cosmetic — no impact on RBAC)."},
+      {"endpoint": "POST /api/auth/register", "issue": "(carry-over from iter1) still accepts role from request body — public callers can self-assign 'admin'."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2_templates_credentials.py",
+    "/app/backend/tests/test_healthguard_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/iteration2_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "None required — all iteration-2 features work as specified. (Optional) consider documenting that category='caregiver_onboarding' is template/shared and personal onboarding files should use category='caregiver' with owner_id scoping.",
+    "(Carry-over) Harden POST /api/auth/register against admin self-assignment."
+  ],
+  "critical_code_review_comments": [
+    "Seeding helper uses await db.documents.find_one({'category', 'title'}) per row — fine for ~32 docs but could be one bulk query if list grows.",
+    "Document.list endpoint sorts by ('seq',1) then ('uploaded_at',-1) which correctly produces numbered templates first; non-template docs (seq=null) sort after.",
+    "GET /api/credentials/expiring uses `expires_at: {$ne: null, $lte: cutoff}` — correctly returns already-expired docs too (validated by test).",
+    "Caregiver scoping query unions owner_id==self with category in {training,policy,client_onboarding,caregiver_onboarding} and owner_type='agency' — matches spec.",
+    "server.py now ~740 lines — within tolerance, but approaching the recommended split threshold."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2_templates_credentials.py (new, 15 tests)",
+    "/app/backend/tests/test_healthguard_api.py (updated TestDocuments::test_caregiver_scoping to use new caregiver_onboarding category)"
+  ],
+  "success_rate": {"backend": "100% (35/35 total: 20 legacy + 15 iteration2)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Tests trigger POST /api/documents/seed-templates which persists 32 template/policy docs (10 client_onboarding + 12 caregiver_onboarding + 10 policy). These are idempotent and intended to remain in DB. All other TEST_-prefixed docs are deleted in try/finally.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: python -m pytest /app/backend/tests/ -v. Uses EXPO_BACKEND_URL from /app/frontend/.env. Iteration 2 endpoints: POST /api/documents/seed-templates (admin), GET /api/credentials/templates, GET /api/credentials/expiring?days=N. Admin name is now 'Sister to Sister, PHCP'. Document categories accepted: client, caregiver, client_onboarding, caregiver_onboarding, credential, training, policy ('onboarding' alone is NOT a valid category anymore).",
+  "rca_of_issue": "Two iteration-2 tests initially failed on `'_id' not in json.dumps(...)` substring match — false positive caused by keys like 'owner_id'/'uploaded_id' containing the substring '_id'. Fixed by checking `'_id' not in dict` instead (same fix pattern recorded in iteration_1.json). One legacy test failed because it sent category='onboarding' which was removed from DocCategory in iter2 — updated to category='caregiver_onboarding' and dropped the per-caregiver scoping assertion since caregiver_onboarding is now a shared template category by design."
+}

@@ -8,7 +8,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { Link, useRouter } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
-import { theme, HERO_IMAGE } from "@/src/theme";
+import { theme, BRAND_NAME, BRAND_TAGLINE, LOGO_URL } from "@/src/theme";
 
 export default function Login() {
   const { login } = useAuth();
@@ -41,19 +41,16 @@ export default function Login() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.heroWrap}>
-          <Image source={{ uri: HERO_IMAGE }} style={styles.hero} contentFit="cover" />
-          <LinearGradient
-            colors={["rgba(17,20,18,0.15)", "rgba(17,20,18,0.85)"]}
-            style={styles.scrim}
-          />
+          <View style={StyleSheet.absoluteFill}>
+            <LinearGradient
+              colors={["#1a0606", "#000000"]}
+              style={StyleSheet.absoluteFill}
+            />
+          </View>
           <View style={styles.heroContent}>
-            <View style={styles.logo}>
-              <Ionicons name="shield-checkmark" size={22} color="#fff" />
-            </View>
-            <Text style={styles.heroTitle}>HealthGuard</Text>
-            <Text style={styles.heroSubtitle}>
-              Audit-ready compliance for home health agencies
-            </Text>
+            <Image source={{ uri: LOGO_URL }} style={styles.logoImg} contentFit="contain" />
+            <Text style={styles.heroTitle}>{BRAND_NAME}</Text>
+            <Text style={styles.heroSubtitle}>{BRAND_TAGLINE}</Text>
           </View>
         </View>
 
@@ -124,19 +121,20 @@ export default function Login() {
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.colors.surface },
   scroll: { flexGrow: 1 },
-  heroWrap: { height: 280, position: "relative" },
+  heroWrap: { height: 320, position: "relative" },
   hero: { ...StyleSheet.absoluteFillObject },
   scrim: { ...StyleSheet.absoluteFillObject },
   heroContent: {
-    position: "absolute", bottom: 24, left: 24, right: 24,
+    position: "absolute", bottom: 24, left: 24, right: 24, alignItems: "flex-start",
   },
+  logoImg: { width: 96, height: 96, marginBottom: 8, marginLeft: -8 },
   logo: {
     width: 40, height: 40, borderRadius: 12,
     backgroundColor: theme.colors.brandPrimary,
     alignItems: "center", justifyContent: "center", marginBottom: 12,
   },
-  heroTitle: { color: "#fff", fontSize: 28, fontWeight: "700", letterSpacing: -0.5 },
-  heroSubtitle: { color: "rgba(255,255,255,0.85)", fontSize: 14, marginTop: 4 },
+  heroTitle: { color: "#fff", fontSize: 24, fontWeight: "700", letterSpacing: -0.3 },
+  heroSubtitle: { color: "rgba(255,255,255,0.75)", fontSize: 13, marginTop: 4 },
   form: { padding: 24, gap: 14 },
   title: { fontSize: 24, fontWeight: "700", color: theme.colors.onSurface },
   subtitle: { fontSize: 14, color: theme.colors.muted, marginBottom: 8 },

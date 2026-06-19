@@ -200,15 +200,9 @@ class TestDocuments:
             },
             {
                 "title": "TEST_onboard_own",
-                "category": "onboarding",
+                "category": "caregiver_onboarding",
                 "owner_type": "caregiver",
                 "owner_id": caregiver_user["id"],
-            },
-            {
-                "title": "TEST_onboard_other",
-                "category": "onboarding",
-                "owner_type": "caregiver",
-                "owner_id": "other-fake-cgid",
             },
         ]
         for body in defs:
@@ -225,7 +219,6 @@ class TestDocuments:
             assert "TEST_caregiver_own" in titles
             assert "TEST_onboard_own" in titles
             assert "TEST_caregiver_other" not in titles
-            assert "TEST_onboard_other" not in titles
         finally:
             for did in created:
                 requests.delete(f"{base_url}/api/documents/{did}", headers=admin_headers, timeout=15)

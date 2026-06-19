@@ -47,6 +47,15 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="policies"
+        options={{
+          title: "Policies",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="shield-checkmark-outline" color={color} size={size} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="assistant"
         options={{
           title: "Assistant",

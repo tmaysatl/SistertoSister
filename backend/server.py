@@ -105,10 +105,17 @@ class ClientCreate(BaseModel):
     notes: Optional[str] = ""
 
 
+DocCategory = Literal[
+    "client", "caregiver",
+    "client_onboarding", "caregiver_onboarding",
+    "credential", "training", "policy",
+]
+
+
 class Document(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
-    category: Literal["client", "caregiver", "onboarding", "training", "policy"]
+    category: DocCategory
     owner_id: Optional[str] = None  # client_id or caregiver_id
     owner_type: Optional[Literal["client", "caregiver", "agency"]] = "agency"
     file_base64: Optional[str] = None  # base64 data uri
@@ -117,17 +124,21 @@ class Document(BaseModel):
     uploaded_by: str
     uploaded_at: str = Field(default_factory=now_iso)
     expires_at: Optional[str] = None
+    seq: Optional[int] = None
+    is_template: bool = False
 
 
 class DocumentCreate(BaseModel):
     title: str
-    category: Literal["client", "caregiver", "onboarding", "training", "policy"]
+    category: DocCategory
     owner_id: Optional[str] = None
     owner_type: Optional[Literal["client", "caregiver", "agency"]] = "agency"
     file_base64: Optional[str] = None
     mime_type: Optional[str] = "application/pdf"
     notes: Optional[str] = ""
     expires_at: Optional[str] = None
+    seq: Optional[int] = None
+    is_template: bool = False
 
 
 class Assignment(BaseModel):
@@ -323,9 +334,11 @@ async def list_documents(
             {"owner_id": current.id},
             {"owner_type": "agency"},
             {"category": "training"},
-            {"category": "onboarding", "owner_id": current.id},
+            {"category": "policy"},
+            {"category": "client_onboarding"},
+            {"category": "caregiver_onboarding"},
         ]}]}
-    docs = await db.documents.find(q, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    docs = await db.documents.find(q, {"_id": 0}).sort([("seq", 1), ("uploaded_at", -1)]).to_list(500)
     return [Document(**d) for d in docs]
 
 
@@ -341,6 +354,109 @@ async def get_document(doc_id: str, _: UserPublic = Depends(get_current_user)):
 async def delete_document(doc_id: str, _: UserPublic = Depends(require_admin)):
     await db.documents.delete_one({"id": doc_id})
     return {"ok": True}
+
+
+# ---------- STANDARD ONBOARDING TEMPLATES (admin) ----------
+CLIENT_ONBOARDING_TEMPLATES = [
+    "Client Intake Form",
+    "Service Agreement",
+    "Plan of Care",
+    "Emergency Contact Sheet",
+    "Medication List",
+    "HIPAA Notice of Privacy Practices",
+    "Client Rights & Responsibilities",
+    "Advance Directives Acknowledgment",
+    "Client Photo / ID Consent",
+    "Initial Home Safety Assessment",
+]
+
+CAREGIVER_ONBOARDING_TEMPLATES = [
+    "Employment Application",
+    "Form I-9 Employment Eligibility",
+    "Form W-4 Tax Withholding",
+    "Direct Deposit Authorization",
+    "OIG / Background Check Authorization",
+    "TB Test / Health Clearance",
+    "Confidentiality & HIPAA Agreement",
+    "Code of Conduct Acknowledgment",
+    "Job Description Acknowledgment",
+    "Emergency Contact Form",
+    "Orientation Sign-Off",
+    "Caregiver Competency Checklist",
+]
+
+CAREGIVER_CREDENTIAL_TEMPLATES = [
+    "State License / Certification",
+    "OIG Background Check",
+    "Training Certificate",
+    "CPR / First Aid Certification",
+    "TB Test Result",
+    "Driver's License",
+    "Auto Insurance",
+]
+
+POLICY_TEMPLATES = [
+    "Code of Conduct",
+    "HIPAA Privacy Policy",
+    "Bloodborne Pathogens & Infection Control",
+    "Emergency Preparedness Plan",
+    "Medication Management Policy",
+    "Incident & Accident Reporting",
+    "Anti-Discrimination & Harassment Policy",
+    "Grievance Procedure",
+    "Documentation Standards",
+    "Caregiver Code of Ethics",
+]
+
+
+@api.post("/documents/seed-templates")
+async def seed_templates(current: UserPublic = Depends(require_admin)):
+    """Seed standard numbered onboarding templates + blank policy stubs."""
+    created = 0
+
+    async def seed(category: str, titles: list[str], is_template: bool = True):
+        nonlocal created
+        for i, t in enumerate(titles, start=1):
+            title = f"{i:02d} - {t}"
+            exists = await db.documents.find_one({"category": category, "title": title})
+            if exists:
+                continue
+            doc = Document(
+                title=title,
+                category=category,  # type: ignore
+                owner_type="agency",
+                notes="Standard template — upload completed file or attach blank PDF",
+                uploaded_by=current.id,
+                seq=i,
+                is_template=is_template,
+            )
+            await db.documents.insert_one(doc.dict())
+            created += 1
+
+    await seed("client_onboarding", CLIENT_ONBOARDING_TEMPLATES)
+    await seed("caregiver_onboarding", CAREGIVER_ONBOARDING_TEMPLATES)
+    await seed("policy", POLICY_TEMPLATES, is_template=False)
+    return {"created": created}
+
+
+@api.get("/credentials/templates")
+async def credential_templates(_: UserPublic = Depends(get_current_user)):
+    """Return suggested credential titles for caregivers to upload."""
+    return {"titles": CAREGIVER_CREDENTIAL_TEMPLATES}
+
+
+@api.get("/credentials/expiring")
+async def expiring_credentials(
+    days: int = 60,
+    current: UserPublic = Depends(get_current_user),
+):
+    """List credentials expiring within `days` days (or already expired)."""
+    cutoff = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    q = {"category": "credential", "expires_at": {"$ne": None, "$lte": cutoff}}
+    if current.role == "caregiver":
+        q["owner_id"] = current.id
+    docs = await db.documents.find(q, {"_id": 0}).sort("expires_at", 1).to_list(200)
+    return [Document(**d) for d in docs]
 
 
 # ---------- ASSIGNMENTS ----------
@@ -583,12 +699,18 @@ async def seed_admin():
         await db.users.insert_one({
             "id": uid,
             "email": "admin@healthguard.com",
-            "name": "Agency Owner",
+            "name": "Sister to Sister, PHCP",
             "role": "admin",
             "hashed_password": hash_password("Admin@123"),
             "created_at": now_iso(),
         })
         logger.info("Seeded default admin: admin@healthguard.com / Admin@123")
+    elif existing.get("name") == "Agency Owner":
+        # Rebrand legacy seeded admin
+        await db.users.update_one(
+            {"email": "admin@healthguard.com"},
+            {"$set": {"name": "Sister to Sister, PHCP"}},
+        )
 
     existing_cg = await db.users.find_one({"email": "caregiver@healthguard.com"})
     if not existing_cg:

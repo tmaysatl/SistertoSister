@@ -41,3 +41,8 @@ export const theme = {
 
 export const HERO_IMAGE =
   "https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njd8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBjbGVhbiUyMGFic3RyYWN0JTIwYXJjaGl0ZWN0dXJhbCUyMHRleHR1cmUlMjBicmlnaHR8ZW58MHx8fHwxNzgxODkyMjYyfDA&ixlib=rb-4.1.0&q=85";
+
+export const BRAND_NAME = "Sister to Sister, PHCP";
+export const BRAND_TAGLINE = "Audit-ready compliance for home health";
+export const LOGO_URL =
+  "https://customer-assets.emergentagent.com/job_audit-prep-hub/artifacts/3dundaal_FullLogo_Transparent_NoBuffer_SistertoSisterPHCP.png";
