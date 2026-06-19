@@ -358,16 +358,19 @@ async def delete_document(doc_id: str, _: UserPublic = Depends(require_admin)):
 
 # ---------- STANDARD ONBOARDING TEMPLATES (admin) ----------
 CLIENT_ONBOARDING_TEMPLATES = [
-    "Client Intake Form",
-    "Service Agreement",
-    "Plan of Care",
-    "Emergency Contact Sheet",
-    "Medication List",
-    "HIPAA Notice of Privacy Practices",
-    "Client Rights & Responsibilities",
-    "Advance Directives Acknowledgment",
-    "Client Photo / ID Consent",
-    "Initial Home Safety Assessment",
+    "Welcome Letter",
+    "Advanced Directives",
+    "Abuse, Licensing & State Hotline Phones",
+    "HIPAA / Notice of Privacy Rights",
+    "Client's Authorization Form",
+    "Provider Complaint",
+    "Home Safe Guidelines",
+    "Disaster Planning / Emergency Plan",
+    "Auto Release",
+    "Party Payer Information",
+    "Client's Rights & Responsibilities",
+    "Authorization of Use of Personal Funds",
+    "Client-Specific Medication & Dietary",
 ]
 
 CAREGIVER_ONBOARDING_TEMPLATES = [
@@ -411,11 +414,23 @@ POLICY_TEMPLATES = [
 
 @api.post("/documents/seed-templates")
 async def seed_templates(current: UserPublic = Depends(require_admin)):
-    """Seed standard numbered onboarding templates + blank policy stubs."""
+    """Seed standard numbered onboarding templates + blank policy stubs.
+
+    For onboarding templates: any existing *empty* template stub
+    (is_template=True, no file attached) is removed first, so that the live
+    template list always reflects the latest version. Any stub the admin has
+    already attached a file to is preserved.
+    """
     created = 0
 
     async def seed(category: str, titles: list[str], is_template: bool = True):
         nonlocal created
+        if is_template:
+            await db.documents.delete_many({
+                "category": category,
+                "is_template": True,
+                "$or": [{"file_base64": None}, {"file_base64": ""}],
+            })
         for i, t in enumerate(titles, start=1):
             title = f"{i:02d} - {t}"
             exists = await db.documents.find_one({"category": category, "title": title})
