@@ -496,22 +496,31 @@ async def set_client_photo(client_id: str, p: PhotoPayload,
 
 
 # ---------- SHIFTS (schedule + clock-in/out) ----------
+WEEKDAY_MAP = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+
+
 class Shift(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     caregiver_id: str
     client_id: str
     kind: Literal["recurring", "one_off"] = "one_off"
-    # for one_off
+    # for one_off (a single date)
     date: Optional[str] = None  # YYYY-MM-DD
-    # for recurring
-    weekdays: Optional[List[str]] = None  # e.g. ["MON","WED","FRI"]
-    start_time: str  # HH:MM
-    end_time: str    # HH:MM
+    # for recurring (kept on the parent only; we still expand it into one_off children)
+    weekdays: Optional[List[str]] = None
+    recurring_until: Optional[str] = None  # YYYY-MM-DD inclusive
+    parent_shift_id: Optional[str] = None  # set on generated children
+    start_time: str            # HH:MM
+    end_time: str              # HH:MM
     notes: Optional[str] = ""
+    service_type: Optional[str] = ""    # e.g. "Personal Care", "Companion"
+    status: Literal["scheduled", "in_progress", "completed", "cancelled"] = "scheduled"
     clocked_in_at: Optional[str] = None
     clocked_out_at: Optional[str] = None
     clock_location: Optional[str] = None
+    created_by: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
+    updated_at: Optional[str] = None
 
 
 class ShiftCreate(BaseModel):
@@ -520,38 +529,177 @@ class ShiftCreate(BaseModel):
     kind: Literal["recurring", "one_off"] = "one_off"
     date: Optional[str] = None
     weekdays: Optional[List[str]] = None
+    recurring_until: Optional[str] = None
     start_time: str
     end_time: str
     notes: Optional[str] = ""
+    service_type: Optional[str] = ""
+
+
+class ShiftUpdate(BaseModel):
+    caregiver_id: Optional[str] = None
+    client_id: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    notes: Optional[str] = None
+    service_type: Optional[str] = None
+    status: Optional[Literal["scheduled", "in_progress", "completed", "cancelled"]] = None
+
+
+def _expand_recurring(parent: Shift) -> List[Shift]:
+    """Generate one_off child shifts from a recurring parent.
+    weekdays = ['MON','WED','FRI']; recurring_until inclusive."""
+    from datetime import date as _date, timedelta
+    if not parent.weekdays or not parent.recurring_until or not parent.date:
+        return []
+    try:
+        d0 = _date.fromisoformat(parent.date)
+        d1 = _date.fromisoformat(parent.recurring_until)
+    except Exception:
+        return []
+    wanted = {WEEKDAY_MAP[w] for w in parent.weekdays if w in WEEKDAY_MAP}
+    if not wanted:
+        return []
+    children: list[Shift] = []
+    d = d0
+    while d <= d1 and len(children) < 366:
+        if d.weekday() in wanted:
+            children.append(Shift(
+                caregiver_id=parent.caregiver_id, client_id=parent.client_id,
+                kind="one_off", date=d.isoformat(),
+                start_time=parent.start_time, end_time=parent.end_time,
+                notes=parent.notes, service_type=parent.service_type,
+                created_by=parent.created_by, parent_shift_id=parent.id,
+                status="scheduled",
+            ))
+        d += timedelta(days=1)
+    return children
+
+
+async def _resolve_user(uid: str) -> Optional[dict]:
+    return await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "name": 1, "email": 1, "role": 1})
 
 
 @api.post("/shifts", response_model=Shift)
-async def create_shift(req: ShiftCreate, _: UserPublic = Depends(require_admin)):
-    obj = Shift(**req.dict())
-    await db.shifts.insert_one(obj.dict())
-    return obj
+async def create_shift(req: ShiftCreate, current: UserPublic = Depends(get_current_user)):
+    # Caregivers may self-schedule only for themselves AND for a client they're assigned to
+    if current.role == "caregiver":
+        if req.caregiver_id != current.id:
+            raise HTTPException(403, "Caregivers can only schedule shifts for themselves.")
+        link = await db.assignments.find_one(
+            {"caregiver_id": current.id, "client_id": req.client_id})
+        if not link:
+            raise HTTPException(403, "You are not assigned to this client.")
+    parent = Shift(**req.dict(), created_by=current.id)
+    await db.shifts.insert_one(parent.dict())
+    # Expand recurring
+    if parent.kind == "recurring":
+        children = _expand_recurring(parent)
+        if children:
+            await db.shifts.insert_many([c.dict() for c in children])
+    # Push notify caregiver if admin created for someone else
+    if current.role == "admin" and parent.caregiver_id != current.id:
+        try:
+            await send_push(
+                recipients=[parent.caregiver_id],
+                data={
+                    "title": "New shift scheduled",
+                    "message": f"{parent.date or 'Recurring'} · {parent.start_time}-{parent.end_time}",
+                    "action_url": "/schedule",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"shift push failed: {e}")
+    return parent
 
 
 @api.get("/shifts", response_model=List[Shift])
 async def list_shifts(
     client_id: Optional[str] = None,
     caregiver_id: Optional[str] = None,
+    start: Optional[str] = None,  # YYYY-MM-DD inclusive
+    end: Optional[str] = None,    # YYYY-MM-DD inclusive
     current: UserPublic = Depends(get_current_user),
 ):
-    q = {}
+    q: dict = {}
     if client_id:
         q["client_id"] = client_id
     if caregiver_id:
         q["caregiver_id"] = caregiver_id
     if current.role == "caregiver":
         q["caregiver_id"] = current.id
-    docs = await db.shifts.find(q, {"_id": 0}).sort("date", 1).to_list(500)
+    # Hide parent recurring rows from calendar; show children only
+    q["$or"] = [{"kind": "one_off"}, {"kind": {"$exists": False}}]
+    if start or end:
+        date_q: dict = {}
+        if start:
+            date_q["$gte"] = start
+        if end:
+            date_q["$lte"] = end
+        q["date"] = date_q
+    docs = await db.shifts.find(q, {"_id": 0}).sort("date", 1).to_list(1000)
     return [Shift(**d) for d in docs]
 
 
+@api.put("/shifts/{shift_id}", response_model=Shift)
+async def update_shift(shift_id: str, req: ShiftUpdate,
+                       current: UserPublic = Depends(get_current_user)):
+    d = await db.shifts.find_one({"id": shift_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Shift not found")
+    # Only admin can fully edit; caregivers may edit notes/service_type for their own un-clocked shifts
+    is_admin = current.role == "admin"
+    is_owner = d.get("caregiver_id") == current.id
+    if not is_admin and not is_owner:
+        raise HTTPException(403, "Not allowed")
+    patch = {k: v for k, v in req.dict(exclude_unset=True).items() if v is not None}
+    if not is_admin:
+        allowed = {"notes", "service_type"}
+        patch = {k: v for k, v in patch.items() if k in allowed}
+    if not patch:
+        return Shift(**d)
+    patch["updated_at"] = now_iso()
+    await db.shifts.update_one({"id": shift_id}, {"$set": patch})
+    d.update(patch)
+    # Notify caregiver if admin changed their shift
+    if is_admin and d.get("caregiver_id") and d["caregiver_id"] != current.id:
+        try:
+            await send_push(
+                recipients=[d["caregiver_id"]],
+                data={
+                    "title": "Shift updated",
+                    "message": f"{d.get('date','')} · {d.get('start_time','')}-{d.get('end_time','')}",
+                    "action_url": "/schedule",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"shift update push failed: {e}")
+    return Shift(**d)
+
+
 @api.delete("/shifts/{shift_id}")
-async def delete_shift(shift_id: str, _: UserPublic = Depends(require_admin)):
+async def delete_shift(shift_id: str, current: UserPublic = Depends(require_admin)):
+    d = await db.shifts.find_one({"id": shift_id}, {"_id": 0})
+    if not d:
+        return {"ok": True}
     await db.shifts.delete_one({"id": shift_id})
+    # Cascade-delete children if a recurring parent was removed
+    if d.get("kind") == "recurring":
+        await db.shifts.delete_many({"parent_shift_id": d["id"]})
+    # Notify caregiver
+    if d.get("caregiver_id"):
+        try:
+            await send_push(
+                recipients=[d["caregiver_id"]],
+                data={
+                    "title": "Shift cancelled",
+                    "message": f"{d.get('date','')} · {d.get('start_time','')}-{d.get('end_time','')}",
+                    "action_url": "/schedule",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"shift cancel push failed: {e}")
     return {"ok": True}
 
 
@@ -567,7 +715,8 @@ async def clock_in(shift_id: str, req: ClockReq,
         raise HTTPException(404, "Shift not found")
     if current.role == "caregiver" and d["caregiver_id"] != current.id:
         raise HTTPException(403, "Not your shift")
-    update = {"clocked_in_at": now_iso(), "clock_location": req.location}
+    update = {"clocked_in_at": now_iso(), "clock_location": req.location,
+              "status": "in_progress", "updated_at": now_iso()}
     await db.shifts.update_one({"id": shift_id}, {"$set": update})
     d.update(update)
     return Shift(**d)
@@ -581,7 +730,7 @@ async def clock_out(shift_id: str, req: ClockReq,
         raise HTTPException(404, "Shift not found")
     if current.role == "caregiver" and d["caregiver_id"] != current.id:
         raise HTTPException(403, "Not your shift")
-    update = {"clocked_out_at": now_iso()}
+    update = {"clocked_out_at": now_iso(), "status": "completed", "updated_at": now_iso()}
     await db.shifts.update_one({"id": shift_id}, {"$set": update})
     d.update(update)
     return Shift(**d)

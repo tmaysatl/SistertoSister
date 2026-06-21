@@ -38,3 +38,16 @@ export async function apiDelete<T>(path: string): Promise<T> {
   if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status}`);
   return res.json();
 }
+
+export async function apiPut<T>(path: string, body: any): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`PUT ${path} failed: ${res.status} ${t}`);
+  }
+  return res.json();
+}

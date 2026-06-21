@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 4 — Schedule tab + Shifts API. All 10 new backend tests in test_iteration4_shifts.py PASS (admin one_off create+list, recurring parent expanded into ~12 children with parent_shift_id, date-range listing excludes parent, caregiver self-schedule allowed only for assigned client else 403, caregiver cannot schedule for another caregiver, admin can edit all fields, caregiver can edit only notes/service_type, caregiver cannot delete, clock-in→in_progress, clock-out→completed, recurring parent delete cascades to children). Full suite: 46/50 PASS — the 4 failures are the SAME pre-existing iter2 seed-templates test bitrot already documented in iteration_3.json and explicitly called out as unrelated by main agent. Frontend mobile flow verified end-to-end at 390x844: admin login → Schedule tab loads with 'Schedule' header + 'Sunday, June 21 2026' subtitle → Day/Week toggle works (Week shows 7 day groups Mon Jun 15 – Sun Jun 21 with count badges) → nav-prev/today/next works → 'New shift' modal opens with 7 caregiver chips + 1 client chip + service-type chips + date/start/end inputs → filling 2026-06-21 14:00–16:00 Personal Care saves and the shift appears in Day view (status SCHEDULED) → tapping the shift opens edit modal, notes edit persists ('TEST_edited_note' round-tripped), admin sees 'Cancel shift' button which calls DELETE successfully. Caregiver login → Schedule tab loads → 'New shift' modal correctly HIDES the caregiver picker (cg_chips=0) and only shows the 1 assigned client; caregiver sees their existing shift with a 'Clock in' button. Regression: Documents tab still loads after caregiver login. No deprecated Expo packages introduced; no SafeAreaView issues. No React Native red screen errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/register", "issue": "(carry-over, NOT introduced in iter4) accepts arbitrary role in request body — public callers can self-assign admin."},
+      {"endpoint": "POST /api/shifts (recurring)", "issue": "Push notification on creation is only fired for the parent insert, not for each generated child shift. Acceptable — but if children are 'edited' or 'cancelled' later via admin PUT/DELETE, those each emit their own push. Optionally batch the recurring-create push so the caregiver gets ONE 'recurring shift scheduled' notification instead of risking N if logic ever changes."},
+      {"endpoint": "GET /api/shifts", "issue": "Caregivers receive q['caregiver_id'] = current.id which silently overrides any caregiver_id query param. Fine for current ACL but consider 403'ing instead so callers can't be misled."},
+      {"endpoint": "PUT /api/shifts/{id}", "issue": "When a caregiver sends disallowed fields (e.g. start_time), they are silently dropped and the endpoint returns 200 with the ORIGINAL values. No 4xx is raised. Consider returning 403 or 400 'fields not allowed for role'."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "schedule.tsx editor modal", "issues": ["Date / Start / End / Until are plain TextInputs (YYYY-MM-DD and HH:MM). No native datepicker / time picker — easy to enter invalid dates. Consider react-native-community/datetimepicker or @react-native-community/datetimepicker for mobile. Low priority since iter4 is a manual-only fallback before EVV."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_shifts.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [
+    "(Optional, low) Replace YYYY-MM-DD / HH:MM TextInputs in schedule.tsx with native date/time pickers for fewer input mistakes.",
+    "(Optional) Have PUT /api/shifts return 403 when a caregiver sends fields outside the allowed set (notes/service_type) rather than silently dropping them.",
+    "(Carry-over, not a regression) Reconcile /app/backend/tests/test_iteration2_templates_credentials.py expectations with current seed behavior (4 failures, all pre-existing, documented in iteration_3.json)."
+  ],
+  "critical_code_review_comments": [
+    "Shift recurring expansion in server.py:_expand_recurring is correct: bounded by 366 days, gracefully no-ops on missing weekdays/until/date, generates children with parent_shift_id and kind='one_off'.",
+    "GET /api/shifts correctly excludes recurring parents from date-range queries with $or: [{kind: one_off}, {kind: $exists: false}] — verified in test_recurring_expands_into_children.",
+    "Caregiver self-scheduling guard (server.py:585-593) correctly enforces both same-self check AND assignment-exists check; verified 403 in two tests.",
+    "schedule.tsx uses Pressable with testID throughout (add-shift-button, view-day, view-week, nav-prev/today/next, pick-cg-{id}, pick-cl-{id}, wd-{MON..}, shift-date/start/end/notes, svc-{type}, save-shift, delete-shift, shift-{id}, clock-in-{id}, clock-out-{id}) — excellent test coverage hooks.",
+    "schedule.tsx correctly hides admin-only caregiver picker for caregivers and auto-pins caregiver_id to self via openCreate (line 116). Verified in UI test.",
+    "DELETE /api/shifts cascade-deletes children when parent.kind=='recurring' — verified by test_delete_recurring_cascade.",
+    "Push notifications via send_push are wrapped in try/except (non-blocking) — good resilience. EMERGENT_PUSH_KEY is read from env, no hardcoding.",
+    "server.py is now ~1760 lines — still recommend splitting into routers (documents.py, shifts.py, assignments.py, chat.py) for maintainability (also flagged in iter3)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_shifts.py (new, 10 tests, module-scoped fixtures to share TEST_ client + assignment across the suite)"
+  ],
+  "success_rate": {"backend": "100% on new iter4 tests (10/10). Overall suite: 46/50 (92%); the 4 failures are pre-existing iter2 bitrot, unchanged from iteration 3.", "frontend": "100% on iter4 schedule flows verified manually (admin: list/create/edit/delete + day/week toggle + date nav + clock; caregiver: picker hidden, assigned-client-only chips, clock-in visible)."},
+  "seed_data_creation": "test_iteration4_shifts.py creates a TEST_ client + caregiver-assignment + several TEST_ one_off and recurring shifts; the _cleanup_shifts function-scoped fixture deletes each parent via DELETE /api/shifts and the module-scoped client fixture deletes the client (which cascades assignments + tasks). UI test left 1 stray shift (14:00–16:00 Personal Care for Sarah Johnson + Test Client Jones on 2026-06-21 with notes 'TEST_edited_note') that the next iteration's UI test should clean up via the admin delete-shift button; not a regression.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter4 test file: /app/backend/tests/test_iteration4_shifts.py. Key testIDs in /app/frontend/app/(tabs)/schedule.tsx: add-shift-button, view-day, view-week, nav-prev, nav-today, nav-next, pick-cg-{id}, pick-cl-{id}, kind-one_off, kind-recurring, wd-{MON|TUE|...}, recurring-from, recurring-until, shift-date, shift-start, shift-end, svc-{service}, shift-notes, save-shift, delete-shift, shift-{id}, clock-in-{id}, clock-out-{id}. Login: 'Sign in' text appears TWICE (subtitle + button) — use page.get_by_text('Sign in', exact=True).last to click the button. The 4 pre-existing iter2 failures are still NOT regressions. Use mod_admin_headers (module-scoped) when sharing TEST_ resources across tests; the conftest only provides function-scoped admin_headers.",
+  "rca_of_issue": "No new defects. Pre-existing 4 iter2 failures unchanged: (a) seed-templates is intentionally non-idempotent (delete-and-recreate empty stubs); (b) CLIENT_ONBOARDING_TEMPLATES expanded from 10→13 titles in server.py; (c) extra non-numbered 'Policy & Procedure Handbook' policy doc in DB; (d) caregiver_onboarding shows 11 instead of 12 due to a missing 'Employment Application' stub. Recommendation in iter3 still stands: reconcile the iter2 test expectations OR move the seed call into pytest fixtures and assert on counts directly from CLIENT_ONBOARDING_TEMPLATES / CAREGIVER_ONBOARDING_TEMPLATES / POLICY_TEMPLATES constants."
+}
