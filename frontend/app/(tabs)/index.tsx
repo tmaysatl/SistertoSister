@@ -73,6 +73,15 @@ export default function Dashboard() {
                 </View>
               </View>
               <View style={{ flexDirection: "row", gap: 8 }}>
+                {user?.role === "caregiver" && (
+                  <Pressable
+                    testID="open-my-profile"
+                    onPress={() => router.push(`/caregiver/${user.id}`)}
+                    style={styles.iconBtn}
+                  >
+                    <Ionicons name="person-outline" size={20} color="#fff" />
+                  </Pressable>
+                )}
                 <Pressable
                   testID="open-chat-button"
                   onPress={() => router.push("/chat")}

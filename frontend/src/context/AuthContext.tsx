@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
+import * as Notifications from "expo-notifications";
 import { API_BASE } from "../api/client";
 
 export type Role = "admin" | "caregiver";
@@ -46,6 +48,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await AsyncStorage.setItem("userInfo", JSON.stringify(u));
     setToken(t);
     setUser(u);
+    // Register for push (native only; safe no-op in Expo Go without plugin)
+    if (Platform.OS !== "web") {
+      try {
+        const { status } = await Notifications.requestPermissionsAsync();
+        if (status === "granted") {
+          const tokenResp = await Notifications.getDevicePushTokenAsync();
+          await fetch(`${API_BASE}/register-push`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: u.id,
+              platform: Platform.OS,
+              device_token: tokenResp.data,
+            }),
+          });
+        }
+      } catch (e) {
+        console.log("push register skipped:", e);
+      }
+    }
   };
 
   const login = async (email: string, password: string) => {

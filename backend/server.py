@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+import httpx
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -33,6 +34,27 @@ JWT_SECRET = os.environ['JWT_SECRET_KEY']
 JWT_ALG = os.environ.get('JWT_ALGORITHM', 'HS256')
 JWT_EXP_MIN = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', '10080'))
 EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
+EMERGENT_PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
+PUSH_BASE_URL = "https://integrations.emergentagent.com"
+_push_client = httpx.AsyncClient(
+    base_url=PUSH_BASE_URL,
+    headers={"X-Push-Key": EMERGENT_PUSH_KEY},
+    timeout=10.0,
+)
+
+
+async def send_push(recipients: list, data: dict, idempotency_key: Optional[str] = None) -> None:
+    if not recipients or "title" not in data or "message" not in data:
+        return
+    payload: dict = {"recipients": recipients, "data": data}
+    if idempotency_key:
+        payload["$idempotency_key"] = idempotency_key
+    try:
+        resp = await _push_client.post("/api/v1/push/trigger", json=payload)
+        if resp.status_code >= 400:
+            logging.warning(f"Push trigger non-2xx: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        logging.warning(f"Push trigger failed (non-blocking): {e}")
 LOGO_URL = "https://customer-assets.emergentagent.com/job_audit-prep-hub/artifacts/3dundaal_FullLogo_Transparent_NoBuffer_SistertoSisterPHCP.png"
 
 # Cache logo bytes once at startup
@@ -566,6 +588,40 @@ async def clock_out(shift_id: str, req: ClockReq,
 
 
 # ---------- CLIENT DETAIL (drill-in) ----------
+@api.get("/caregivers/{caregiver_id}/detail")
+async def caregiver_detail(caregiver_id: str,
+                           current: UserPublic = Depends(get_current_user)):
+    if current.role == "caregiver" and current.id != caregiver_id:
+        raise HTTPException(403, "Not allowed")
+    cg = await db.users.find_one({"id": caregiver_id, "role": "caregiver"},
+                                  {"_id": 0, "hashed_password": 0})
+    if not cg:
+        raise HTTPException(404, "Caregiver not found")
+    assignments = await db.assignments.find(
+        {"caregiver_id": caregiver_id}, {"_id": 0}
+    ).to_list(100)
+    client_ids = [a["client_id"] for a in assignments]
+    clients = []
+    if client_ids:
+        async for c in db.clients.find({"id": {"$in": client_ids}}, {"_id": 0}):
+            clients.append(c)
+    shifts = await db.shifts.find(
+        {"caregiver_id": caregiver_id}, {"_id": 0}
+    ).sort("date", -1).to_list(200)
+    credentials = await db.documents.find(
+        {"category": "credential", "owner_id": caregiver_id},
+        {"_id": 0, "file_base64": 0},
+    ).sort("uploaded_at", -1).to_list(200)
+    steps = await db.onboarding.find(
+        {"caregiver_id": caregiver_id}, {"_id": 0}
+    ).to_list(200)
+    return {
+        "caregiver": cg, "clients": clients, "assignments": assignments,
+        "shifts": shifts, "credentials": credentials, "onboarding": steps,
+    }
+
+
+
 @api.get("/clients/{client_id}/detail")
 async def client_detail(client_id: str,
                         _: UserPublic = Depends(get_current_user)):
@@ -597,6 +653,31 @@ async def client_detail(client_id: str,
     }
 
 
+class RegisterPushBody(BaseModel):
+    user_id: str
+    platform: str
+    device_token: str
+
+
+@api.post("/register-push", status_code=201)
+async def register_push(body: RegisterPushBody):
+    try:
+        resp = await _push_client.post(
+            "/api/v1/push/users/register", json=body.model_dump()
+        )
+        if resp.status_code == 401:
+            raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
+        if resp.status_code >= 500:
+            raise HTTPException(502, "Push provider unavailable")
+        resp.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"register-push relay failed: {e}")
+    return {"status": "registered"}
+
+
+
 # ---------- IN-APP CHAT (1:1 direct messages) ----------
 class ChatSendReq(BaseModel):
     to_user_id: str
@@ -622,6 +703,18 @@ async def send_message(req: ChatSendReq,
         "read": False,
     }
     await db.chat_dms.insert_one(msg)
+    # Fire push (non-blocking)
+    try:
+        await send_push(
+            recipients=[req.to_user_id],
+            data={
+                "title": f"Message from {current.name}",
+                "message": req.text.strip()[:160],
+                "action_url": f"/chat/{current.id}",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"chat push failed: {e}")
     return {k: v for k, v in msg.items() if k != "_id"}
 
 
