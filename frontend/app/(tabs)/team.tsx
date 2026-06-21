@@ -160,6 +160,19 @@ export default function Team() {
               </View>
               {isAdmin && (
                 <Pressable
+                  testID={`bulk-assign-client-${item.id}`}
+                  onPress={async () => {
+                    await apiPost(`/clients/${item.id}/bulk-assign-onboarding`, {});
+                    load();
+                  }}
+                  style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10, backgroundColor: theme.colors.brandPrimary }}
+                  hitSlop={6}
+                >
+                  <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>Assign Packet</Text>
+                </Pressable>
+              )}
+              {isAdmin && (
+                <Pressable
                   testID={`delete-client-${item.id}`}
                   onPress={() => apiDelete(`/clients/${item.id}`).then(load)}
                   hitSlop={10}

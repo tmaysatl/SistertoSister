@@ -375,7 +375,236 @@ async def get_client(client_id: str, _: UserPublic = Depends(get_current_user)):
 async def delete_client(client_id: str, _: UserPublic = Depends(require_admin)):
     await db.clients.delete_one({"id": client_id})
     await db.assignments.delete_many({"client_id": client_id})
+    await db.client_tasks.delete_many({"client_id": client_id})
     return {"ok": True}
+
+
+# ---------- CLIENT TASKS (per-client onboarding checklist) ----------
+class ClientTask(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_id: str
+    title: str
+    description: Optional[str] = ""
+    seq: Optional[int] = None
+    completed: bool = False
+    completed_at: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+
+
+class BulkAssignClientReq(BaseModel):
+    client_id: str
+
+
+@api.post("/clients/{client_id}/bulk-assign-onboarding")
+async def bulk_assign_client(client_id: str,
+                             _: UserPublic = Depends(require_admin)):
+    cl = await db.clients.find_one({"id": client_id})
+    if not cl:
+        raise HTTPException(404, "Client not found")
+    docs = await db.documents.find(
+        {"category": "client_onboarding"}, {"_id": 0}
+    ).sort("seq", 1).to_list(200)
+    created = 0
+    for d in docs:
+        existing = await db.client_tasks.find_one({
+            "client_id": client_id, "title": d["title"],
+        })
+        if existing:
+            continue
+        task = ClientTask(
+            client_id=client_id,
+            title=d["title"],
+            description=f"Review and sign: {d['title']}",
+            seq=d.get("seq"),
+        )
+        await db.client_tasks.insert_one(task.dict())
+        created += 1
+    return {"created": created, "total_tasks": len(docs)}
+
+
+@api.get("/clients/{client_id}/tasks", response_model=List[ClientTask])
+async def list_client_tasks(client_id: str,
+                            _: UserPublic = Depends(get_current_user)):
+    docs = await db.client_tasks.find(
+        {"client_id": client_id}, {"_id": 0}
+    ).sort("seq", 1).to_list(200)
+    return [ClientTask(**d) for d in docs]
+
+
+@api.post("/client-tasks/{task_id}/toggle", response_model=ClientTask)
+async def toggle_client_task(task_id: str,
+                             _: UserPublic = Depends(require_admin)):
+    d = await db.client_tasks.find_one({"id": task_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Task not found")
+    new_completed = not d.get("completed", False)
+    update = {
+        "completed": new_completed,
+        "completed_at": now_iso() if new_completed else None,
+    }
+    await db.client_tasks.update_one({"id": task_id}, {"$set": update})
+    d.update(update)
+    return ClientTask(**d)
+
+
+# ---------- AUDIT BINDER PDF ----------
+@api.get("/reports/audit-binder")
+async def audit_binder(_: UserPublic = Depends(require_admin)):
+    """Generate single PDF binder of all docs + audit trail (surveyor-ready)."""
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    )
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    # === build cover + index + audit log ===
+    front_buf = io.BytesIO()
+    doc = SimpleDocTemplate(front_buf, pagesize=letter,
+                            leftMargin=0.6 * inch, rightMargin=0.6 * inch,
+                            topMargin=0.6 * inch, bottomMargin=0.6 * inch)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Cover
+    story.append(Spacer(1, 1.2 * inch))
+    logo = _load_logo()
+    if logo:
+        try:
+            img = ImageReader(io.BytesIO(logo))
+            from reportlab.platypus import Image as RLImage
+            tmp = io.BytesIO(logo)
+            story.append(RLImage(tmp, width=2.4 * inch, height=1.6 * inch, kind='proportional'))
+        except Exception as e:
+            logger.warning(f"binder logo: {e}")
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(Paragraph("<font size=24><b>Sister to Sister, PHCP</b></font>", styles["Title"]))
+    story.append(Paragraph("<font size=14>Compliance Audit Binder</font>", styles["Title"]))
+    story.append(Spacer(1, 0.4 * inch))
+    ts = datetime.now(timezone.utc).strftime("%B %d, %Y · %H:%M UTC")
+    story.append(Paragraph(f"<font size=11>Generated: {ts}</font>", styles["Normal"]))
+
+    # Stats
+    n_clients = await db.clients.count_documents({})
+    n_caregivers = await db.users.count_documents({"role": "caregiver"})
+    n_docs_total = await db.documents.count_documents({})
+    n_signed = await db.documents.count_documents({"notes": {"$regex": "Signed"}})
+    n_views = await db.document_views.count_documents({})
+    story.append(Spacer(1, 0.3 * inch))
+    stats_data = [
+        ["Clients", str(n_clients)],
+        ["Caregivers", str(n_caregivers)],
+        ["Documents on file", str(n_docs_total)],
+        ["Signed documents", str(n_signed)],
+        ["Document views logged", str(n_views)],
+    ]
+    t = Table(stats_data, colWidths=[3 * inch, 1.5 * inch])
+    t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#204231")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#BCC2BD")),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E3EBE6")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("PADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(t)
+    story.append(PageBreak())
+
+    # Index
+    story.append(Paragraph("<b>Document Index</b>", styles["Title"]))
+    story.append(Spacer(1, 0.2 * inch))
+    sections = [
+        ("Client Onboarding Packet", "client_onboarding"),
+        ("Caregiver Onboarding Packet", "caregiver_onboarding"),
+        ("Policies & Procedures", "policy"),
+        ("Caregiver Credentials", "credential"),
+        ("Training Materials", "training"),
+    ]
+    for label, cat in sections:
+        docs = await db.documents.find(
+            {"category": cat}, {"_id": 0, "file_base64": 0}
+        ).sort("seq", 1).to_list(500)
+        if not docs:
+            continue
+        story.append(Paragraph(f"<font size=12><b>{label}</b> ({len(docs)})</font>", styles["Heading2"]))
+        for d in docs:
+            attached = "Attached" if True else "—"  # placeholder
+            story.append(Paragraph(f"&nbsp;&nbsp;• {d['title']}", styles["Normal"]))
+        story.append(Spacer(1, 0.15 * inch))
+    story.append(PageBreak())
+
+    # Audit Trail (last 100 views)
+    story.append(Paragraph("<b>Audit Trail</b>", styles["Title"]))
+    story.append(Paragraph("<font size=9>Last 100 document interactions</font>", styles["Normal"]))
+    story.append(Spacer(1, 0.15 * inch))
+    views = await db.document_views.find({}, {"_id": 0}).sort("viewed_at", -1).to_list(100)
+    if views:
+        # build doc id -> title map
+        ids = list({v.get("document_id") for v in views if v.get("document_id")})
+        title_map = {}
+        if ids:
+            async for d in db.documents.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "title": 1}):
+                title_map[d["id"]] = d["title"]
+        rows = [["When (UTC)", "Action", "By", "Document"]]
+        for v in views:
+            action = v.get("action") or "viewed"
+            rows.append([
+                (v.get("viewed_at") or "")[:19].replace("T", " "),
+                action.upper(),
+                (v.get("viewer_name") or "—")[:24],
+                (title_map.get(v.get("document_id"), "—"))[:32],
+            ])
+        tbl = Table(rows, colWidths=[1.4 * inch, 0.8 * inch, 1.6 * inch, 2.6 * inch])
+        tbl.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCC2BD")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.2, colors.HexColor("#E3E5E3")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#204231")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("PADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(tbl)
+    else:
+        story.append(Paragraph("<font color='#888888'>No views logged yet.</font>", styles["Normal"]))
+
+    doc.build(story)
+    front_buf.seek(0)
+
+    # === merge all attached PDFs (each watermarked) ===
+    writer = PdfWriter()
+    front_reader = PdfReader(front_buf)
+    for p in front_reader.pages:
+        writer.add_page(p)
+
+    ts_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    for _label, cat in sections:
+        cdocs = await db.documents.find(
+            {"category": cat, "file_base64": {"$ne": None}}, {"_id": 0}
+        ).sort("seq", 1).to_list(500)
+        for d in cdocs:
+            try:
+                raw = base64.b64decode(d["file_base64"])
+                if (d.get("mime_type") or "").lower() != "application/pdf":
+                    continue
+                stamped = stamp_pdf(raw, "Audit Binder", ts_stamp)
+                r = PdfReader(io.BytesIO(stamped))
+                for p in r.pages:
+                    writer.add_page(p)
+            except Exception as e:
+                logger.warning(f"binder skip {d.get('title')}: {e}")
+
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+
+    fname = f"SisterToSister_AuditBinder_{datetime.now(timezone.utc).strftime('%Y%m%d')}.pdf"
+    return Response(
+        content=out.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+    )
 
 
 # ---------- DOCUMENTS ----------

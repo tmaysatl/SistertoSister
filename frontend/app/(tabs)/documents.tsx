@@ -173,6 +173,30 @@ export default function Documents() {
         {user?.role === "admin" && (
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable
+              testID="audit-binder-button"
+              onPress={async () => {
+                try {
+                  const tok = await AsyncStorage.getItem("userToken");
+                  const res = await fetch(`${API_BASE}/reports/audit-binder`, {
+                    headers: { Authorization: `Bearer ${tok}` },
+                  });
+                  const blob = await res.blob();
+                  if (Platform.OS === "web") {
+                    const url = URL.createObjectURL(blob);
+                    window.open(url, "_blank");
+                  } else {
+                    const r = new FileReader();
+                    r.onloadend = () => Linking.openURL(r.result as string);
+                    r.readAsDataURL(blob);
+                  }
+                } catch (e) { console.log("binder", e); }
+              }}
+              style={[styles.seedBtn, { backgroundColor: theme.colors.brand }]}
+            >
+              <Ionicons name="document-text-outline" size={16} color="#fff" />
+              <Text style={[styles.seedBtnText, { color: "#fff" }]}>Audit Binder</Text>
+            </Pressable>
+            <Pressable
               testID="share-packet-button"
               onPress={() => { setShareLink(null); setShowShare(true); }}
               style={styles.seedBtn}
