@@ -395,6 +395,33 @@ async def list_contacts(current: UserPublic = Depends(get_current_user)):
 
 
 # ---------- AUDIT BINDER PDF ----------
+from playbook_pdf import build_playbook_pdf, build_intake_form_pdf
+
+
+@api.get("/reports/replication-playbook.pdf")
+async def replication_playbook_pdf(_: UserPublic = Depends(require_admin)):
+    """Branded reference PDF for replicating the app for new agencies."""
+    pdf = build_playbook_pdf()
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition":
+                 'inline; filename="Agency_Replication_Playbook.pdf"'},
+    )
+
+
+@api.get("/reports/replication-intake-form.pdf")
+async def replication_intake_form_pdf(_: UserPublic = Depends(require_admin)):
+    """Fillable AcroForm PDF that a new agency can complete to start a
+    replication. Open in Adobe Reader / Preview, fill in the fields, save,
+    and send back."""
+    pdf = build_intake_form_pdf()
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition":
+                 'inline; filename="Agency_Replication_IntakeForm.pdf"'},
+    )
+
+
 @api.get("/reports/audit-binder")
 async def audit_binder(
     client_id: Optional[str] = None,

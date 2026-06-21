@@ -12,6 +12,7 @@ import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { MicrosoftIntegrationCard } from "@/src/components/MicrosoftIntegrationCard";
+import { ReplicationKitCard } from "@/src/components/ReplicationKitCard";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -254,6 +255,7 @@ export default function Documents() {
       </View>
 
       {user?.role === "admin" && <MicrosoftIntegrationCard />}
+      {user?.role === "admin" && <ReplicationKitCard />}
 
       <View style={styles.chipsWrap}>
         <ScrollView
