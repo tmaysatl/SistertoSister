@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput, Modal,
   ActivityIndicator, RefreshControl, KeyboardAvoidingView, Platform, FlatList,
@@ -8,11 +8,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import { useFocusEffect } from "expo-router";
-import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { useAuth } from "@/src/context/AuthContext";
-import { apiGet, apiPost, apiDelete, API_BASE } from "@/src/api/client";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { openAuthedFile } from "@/src/utils/open-file";
+import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme } from "@/src/theme";
 
@@ -69,6 +66,42 @@ export default function Documents() {
   // PDF viewer modal
   const [viewerDoc, setViewerDoc] = useState<DocItem | null>(null);
   const [showBinder, setShowBinder] = useState(false);
+
+  // Push-to-user modal
+  const [pushDoc, setPushDoc] = useState<DocItem | null>(null);
+  const [pushTargets, setPushTargets] = useState<Record<string, { owner_type: "caregiver" | "client" }>>({});
+  const [pushBusy, setPushBusy] = useState(false);
+  const [caregiversList, setCaregiversList] = useState<{ id: string; name: string }[]>([]);
+  const [clientsList, setClientsList] = useState<{ id: string; name: string }[]>([]);
+
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    apiGet<any[]>("/caregivers").then(setCaregiversList).catch(() => { });
+    apiGet<any[]>("/clients").then(setClientsList).catch(() => { });
+  }, [user?.role]);
+
+  const togglePushTarget = (id: string, owner_type: "caregiver" | "client") => {
+    setPushTargets((prev) => {
+      const next = { ...prev };
+      if (next[id]) delete next[id];
+      else next[id] = { owner_type };
+      return next;
+    });
+  };
+
+  const submitPush = async () => {
+    if (!pushDoc) return;
+    const targets = Object.entries(pushTargets).map(([owner_id, v]) => ({ owner_id, owner_type: v.owner_type }));
+    if (targets.length === 0) return;
+    setPushBusy(true);
+    try {
+      await apiPost(`/documents/${pushDoc.id}/push`, { targets });
+      setPushDoc(null);
+      setPushTargets({});
+      await load();
+    } catch (e) { console.log("push err", e); }
+    finally { setPushBusy(false); }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -316,6 +349,16 @@ export default function Documents() {
                   <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
                 </Pressable>
               )}
+              {user?.role === "admin" && hasFile && (
+                <Pressable
+                  testID={`push-doc-${item.id}`}
+                  onPress={(e) => { e.stopPropagation(); setPushDoc(item); setPushTargets({}); }}
+                  hitSlop={10}
+                  style={styles.pushBtn}
+                >
+                  <Ionicons name="person-add-outline" size={16} color="#fff" />
+                </Pressable>
+              )}
               {(user?.role === "admin" || item.owner_id === user?.id) && (
                 <Pressable
                   testID={`delete-doc-${item.id}`}
@@ -553,6 +596,81 @@ export default function Documents() {
         title="Sister to Sister — Audit Binder"
         path={showBinder ? "/reports/audit-binder" : null}
       />
+
+      {/* Push document to user(s) modal */}
+      <Modal visible={!!pushDoc} transparent animationType="slide" onRequestClose={() => setPushDoc(null)}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalRoot}
+        >
+          <Pressable style={styles.backdrop} onPress={() => setPushDoc(null)} />
+          <View style={[styles.sheet, { maxHeight: "85%" }]}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>Push to caregiver / client</Text>
+            <Text style={{ fontSize: 12, color: theme.colors.muted }} numberOfLines={2}>
+              {`Send a copy of "${pushDoc?.title}" to recipients' profiles. They'll see it in their documents and be able to sign if it's a PDF.`}
+            </Text>
+            <ScrollView style={{ maxHeight: 380 }} contentContainerStyle={{ gap: 8, paddingVertical: 8 }}>
+              {caregiversList.length > 0 && (
+                <>
+                  <Text style={styles.fieldLabel}>Caregivers</Text>
+                  {caregiversList.map((c) => {
+                    const sel = !!pushTargets[c.id];
+                    return (
+                      <Pressable
+                        key={c.id}
+                        testID={`push-target-cg-${c.id}`}
+                        onPress={() => togglePushTarget(c.id, "caregiver")}
+                        style={[styles.pushRow, sel && styles.pushRowSel]}
+                      >
+                        <View style={[styles.checkbox, sel && styles.checkboxOn]}>
+                          {sel && <Ionicons name="checkmark" size={14} color="#fff" />}
+                        </View>
+                        <Ionicons name="medkit-outline" size={18} color={theme.colors.brandPrimary} />
+                        <Text style={styles.pushRowText} numberOfLines={1}>{c.name}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </>
+              )}
+              {clientsList.length > 0 && (
+                <>
+                  <Text style={styles.fieldLabel}>Clients</Text>
+                  {clientsList.map((c) => {
+                    const sel = !!pushTargets[c.id];
+                    return (
+                      <Pressable
+                        key={c.id}
+                        testID={`push-target-cl-${c.id}`}
+                        onPress={() => togglePushTarget(c.id, "client")}
+                        style={[styles.pushRow, sel && styles.pushRowSel]}
+                      >
+                        <View style={[styles.checkbox, sel && styles.checkboxOn]}>
+                          {sel && <Ionicons name="checkmark" size={14} color="#fff" />}
+                        </View>
+                        <Ionicons name="person-outline" size={18} color={theme.colors.brandPrimary} />
+                        <Text style={styles.pushRowText} numberOfLines={1}>{c.name}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </>
+              )}
+            </ScrollView>
+            <Pressable
+              testID="submit-push-button"
+              onPress={submitPush}
+              disabled={pushBusy || Object.keys(pushTargets).length === 0}
+              style={[styles.primaryBtn, (pushBusy || Object.keys(pushTargets).length === 0) && { opacity: 0.5 }]}
+            >
+              {pushBusy ? <ActivityIndicator color="#fff" /> : (
+                <Text style={styles.primaryBtnText}>
+                  Push to {Object.keys(pushTargets).length} recipient{Object.keys(pushTargets).length === 1 ? "" : "s"}
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -580,8 +698,11 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.brandTertiary,
     alignItems: "center", justifyContent: "center", marginRight: 4,
   },
-  modalRoot: { flex: 1, justifyContent: "flex-end" },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.4)" },
+  pushBtn: {
+    width: 32, height: 32, borderRadius: 8,
+    backgroundColor: theme.colors.brandPrimary,
+    alignItems: "center", justifyContent: "center", marginRight: 4,
+  },
   secondaryBtn: { padding: 12, alignItems: "center" },
   secondaryBtnText: { color: theme.colors.brandPrimary, fontWeight: "600", fontSize: 14 },
   chipsWrap: { height: 56, justifyContent: "center" },
@@ -640,4 +761,14 @@ const styles = StyleSheet.create({
     borderRadius: 12, alignItems: "center", marginTop: 10,
   },
   primaryBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  pushRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    padding: 10, borderRadius: 10,
+    backgroundColor: theme.colors.surfaceSecondary,
+    borderWidth: 1, borderColor: theme.colors.border,
+  },
+  pushRowSel: { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brandPrimary },
+  pushRowText: { flex: 1, fontSize: 14, fontWeight: "600", color: theme.colors.onSurface },
+  checkbox: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.colors.borderStrong, alignItems: "center", justifyContent: "center" },
+  checkboxOn: { backgroundColor: theme.colors.success, borderColor: theme.colors.success },
 });

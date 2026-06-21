@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
   RefreshControl, Platform,
@@ -13,6 +13,40 @@ import { apiGet, apiPost, API_BASE } from "@/src/api/client";
 import { useAuth } from "@/src/context/AuthContext";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme, BRAND_NAME } from "@/src/theme";
+
+function AssignClientPicker({ caregiverId, assignedIds, onAssigned }: { caregiverId: string; assignedIds: string[]; onAssigned: () => void }) {
+  const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => {
+    apiGet<any[]>("/clients").then(setClients).catch(() => { });
+  }, []);
+  const available = clients.filter((c) => !assignedIds.includes(c.id));
+  if (available.length === 0) {
+    return <Text style={{ fontSize: 12, color: theme.colors.muted, marginTop: 6 }}>All clients already assigned.</Text>;
+  }
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+      {available.map((c) => (
+        <Pressable
+          key={c.id}
+          testID={`assign-cl-${c.id}`}
+          disabled={busy === c.id}
+          onPress={async () => {
+            setBusy(c.id);
+            try {
+              await apiPost("/assignments", { caregiver_id: caregiverId, client_id: c.id });
+              onAssigned();
+            } finally { setBusy(null); }
+          }}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, backgroundColor: theme.colors.brandPrimary, opacity: busy === c.id ? 0.5 : 1 }}
+        >
+          <Ionicons name="add" size={14} color="#fff" />
+          <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>{c.name}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
 
 type Detail = {
   caregiver: { id: string; name: string; email: string; photo_base64?: string };
@@ -188,6 +222,16 @@ export default function CaregiverDetail() {
 
         {tab === "clients" && (
           <View style={{ padding: 16, gap: 10 }}>
+            {isAdmin && (
+              <View>
+                <Text style={[styles.empty, { textAlign: "left", paddingVertical: 0, fontSize: 12, fontWeight: "700", color: theme.colors.muted }]}>ASSIGN A CLIENT</Text>
+                <AssignClientPicker
+                  caregiverId={id as string}
+                  assignedIds={clients.map((c) => c.id)}
+                  onAssigned={load}
+                />
+              </View>
+            )}
             {clients.length === 0 && <Text style={styles.empty}>No clients assigned.</Text>}
             {clients.map((c) => (
               <Pressable key={c.id} onPress={() => router.push(`/client/${c.id}`)} style={styles.row}>

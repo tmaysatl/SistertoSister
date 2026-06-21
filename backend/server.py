@@ -996,6 +996,39 @@ async def delete_document(doc_id: str, _: UserPublic = Depends(require_admin)):
     return {"ok": True}
 
 
+class DocumentPushReq(BaseModel):
+    targets: List[dict]  # [{owner_id, owner_type}]
+
+
+@api.post("/documents/{doc_id}/push")
+async def push_document(doc_id: str, req: DocumentPushReq,
+                        current: UserPublic = Depends(require_admin)):
+    """Clone an existing document and assign each clone to a specific
+    caregiver or client. Pushed copies appear in the recipient's profile
+    documents list (owner_id + owner_type). Keeps signature flow intact."""
+    src = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not src:
+        raise HTTPException(404, "Source document not found")
+    created_ids: list[str] = []
+    for t in req.targets:
+        oid = t.get("owner_id")
+        otype = t.get("owner_type")
+        if not oid or otype not in ("caregiver", "client"):
+            continue
+        clone = {**src}
+        clone.pop("_id", None)
+        clone["id"] = str(uuid.uuid4())
+        clone["owner_id"] = oid
+        clone["owner_type"] = otype
+        clone["uploaded_by"] = current.id
+        clone["uploaded_at"] = now_iso()
+        clone["is_template"] = False
+        clone["seq"] = None
+        await db.documents.insert_one(clone)
+        created_ids.append(clone["id"])
+    return {"created": len(created_ids), "ids": created_ids}
+
+
 @api.get("/documents/{doc_id}/stamped")
 async def get_stamped_document(
     doc_id: str,
@@ -1230,6 +1263,12 @@ async def expiring_credentials(
 @api.post("/assignments", response_model=Assignment)
 async def create_assignment(req: AssignmentCreate,
                             _: UserPublic = Depends(require_admin)):
+    # Prevent duplicate caregiver↔client links (idempotent assignment)
+    existing = await db.assignments.find_one(
+        {"caregiver_id": req.caregiver_id, "client_id": req.client_id}, {"_id": 0}
+    )
+    if existing:
+        return Assignment(**existing)
     obj = Assignment(**req.dict())
     await db.assignments.insert_one(obj.dict())
     return obj

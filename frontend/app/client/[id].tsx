@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
   RefreshControl, Platform,
@@ -10,8 +10,43 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiGet, apiPost, API_BASE } from "@/src/api/client";
+import { useAuth } from "@/src/context/AuthContext";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme, BRAND_NAME } from "@/src/theme";
+
+function AssignCaregiverPicker({ clientId, assignedIds, onAssigned }: { clientId: string; assignedIds: string[]; onAssigned: () => void }) {
+  const [caregivers, setCaregivers] = useState<{ id: string; name: string; photo_base64?: string }[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => {
+    apiGet<any[]>("/caregivers").then(setCaregivers).catch(() => { });
+  }, []);
+  const available = caregivers.filter((c) => !assignedIds.includes(c.id));
+  if (available.length === 0) {
+    return <Text style={{ fontSize: 12, color: theme.colors.muted, marginTop: 6 }}>All caregivers already assigned.</Text>;
+  }
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+      {available.map((c) => (
+        <Pressable
+          key={c.id}
+          testID={`assign-cg-${c.id}`}
+          disabled={busy === c.id}
+          onPress={async () => {
+            setBusy(c.id);
+            try {
+              await apiPost("/assignments", { caregiver_id: c.id, client_id: clientId });
+              onAssigned();
+            } finally { setBusy(null); }
+          }}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, backgroundColor: theme.colors.brandPrimary, opacity: busy === c.id ? 0.5 : 1 }}
+        >
+          <Ionicons name="add" size={14} color="#fff" />
+          <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>{c.name}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
 
 type Detail = {
   client: { id: string; name: string; address?: string; phone?: string; photo_base64?: string };
@@ -65,6 +100,8 @@ export default function ClientDetail() {
     await apiPost(`/client-tasks/${tid}/toggle`, {});
     load();
   };
+
+  const isAdmin = useAuth().user?.role === "admin";
 
   if (loading && !data) {
     return <SafeAreaView style={styles.center}><ActivityIndicator color={theme.colors.brandPrimary} /></SafeAreaView>;
@@ -146,9 +183,19 @@ export default function ClientDetail() {
 
         {tab === "team" && (
           <View style={{ padding: 16, gap: 10 }}>
-            {caregivers.length === 0 && <Text style={styles.empty}>No caregivers assigned yet. Use Team → Caregivers to assign one.</Text>}
+            {isAdmin && (
+              <View>
+                <Text style={[styles.empty, { textAlign: "left", paddingVertical: 0, fontSize: 12, fontWeight: "700", color: theme.colors.muted }]}>ASSIGN A CAREGIVER</Text>
+                <AssignCaregiverPicker
+                  clientId={id as string}
+                  assignedIds={caregivers.map((c) => c.id)}
+                  onAssigned={load}
+                />
+              </View>
+            )}
+            {caregivers.length === 0 && <Text style={styles.empty}>No caregivers assigned yet.</Text>}
             {caregivers.map((c) => (
-              <View key={c.id} style={styles.teamRow}>
+              <Pressable key={c.id} onPress={() => router.push(`/caregiver/${c.id}`)} style={styles.teamRow}>
                 {c.photo_base64 ? (
                   <Image source={{ uri: `data:image/jpeg;base64,${c.photo_base64}` }} style={styles.smallAvatar} contentFit="cover" />
                 ) : (
@@ -160,7 +207,7 @@ export default function ClientDetail() {
                   <Text style={styles.teamName}>{c.name}</Text>
                   <Text style={styles.teamEmail}>{c.email}</Text>
                 </View>
-              </View>
+              </Pressable>
             ))}
           </View>
         )}

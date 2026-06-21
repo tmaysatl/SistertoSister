@@ -211,9 +211,3 @@ const styles = StyleSheet.create({
   btn: { backgroundColor: theme.colors.brandPrimary, padding: 14, borderRadius: 12, alignItems: "center" },
   btnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
 });
-: 24, padding: 20, paddingBottom: 32, gap: 10, height: 460 },
-  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: theme.colors.border, alignSelf: "center" },
-  sheetTitle: { fontSize: 18, fontWeight: "700", color: theme.colors.onSurface },
-  btn: { backgroundColor: theme.colors.brandPrimary, padding: 14, borderRadius: 12, alignItems: "center" },
-  btnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
-});
