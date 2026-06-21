@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput, Modal,
   ActivityIndicator, RefreshControl, KeyboardAvoidingView, Platform, FlatList,
+  Linking,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -237,19 +238,34 @@ export default function Documents() {
           const expSoon =
             expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
           const expired = expiry && expiry.getTime() < Date.now();
+          const hasFile = !!item.file_base64;
+          const open = () => {
+            if (!hasFile) return;
+            const url = `data:${item.mime_type || "application/pdf"};base64,${item.file_base64}`;
+            Linking.openURL(url).catch((e) => console.log("open error", e));
+          };
           return (
-            <View style={styles.docCard} testID={`doc-${item.id}`}>
-              <View style={styles.docIcon}>
+            <Pressable
+              onPress={hasFile ? open : undefined}
+              style={styles.docCard}
+              testID={`doc-${item.id}`}
+            >
+              <View style={[styles.docIcon, hasFile && { backgroundColor: theme.colors.success }]}>
                 <Ionicons
-                  name={item.is_template ? "document-outline" : item.category === "credential" ? "ribbon-outline" : "document-text-outline"}
+                  name={
+                    hasFile ? "document-attach" :
+                    item.is_template ? "document-outline" :
+                    item.category === "credential" ? "ribbon-outline" :
+                    "document-text-outline"
+                  }
                   size={20}
-                  color={theme.colors.brandPrimary}
+                  color={hasFile ? "#fff" : theme.colors.brandPrimary}
                 />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.docTitle} numberOfLines={1}>{item.title}</Text>
                 <Text style={styles.docMeta}>
-                  {item.category.replace("_", " ").toUpperCase()} · {new Date(item.uploaded_at).toLocaleDateString()}
+                  {item.category.replace("_", " ").toUpperCase()} · {hasFile ? "PDF" : "No file"} · {new Date(item.uploaded_at).toLocaleDateString()}
                 </Text>
                 {!!expiry && (
                   <View style={[
@@ -266,6 +282,11 @@ export default function Documents() {
                 )}
                 {!!item.notes && <Text style={styles.docNotes} numberOfLines={2}>{item.notes}</Text>}
               </View>
+              {hasFile && (
+                <Pressable testID={`view-doc-${item.id}`} onPress={open} hitSlop={10} style={styles.viewBtn}>
+                  <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
+                </Pressable>
+              )}
               {(user?.role === "admin" || item.owner_id === user?.id) && (
                 <Pressable
                   testID={`delete-doc-${item.id}`}
@@ -275,7 +296,7 @@ export default function Documents() {
                   <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
                 </Pressable>
               )}
-            </View>
+            </Pressable>
           );
         }}
       />
@@ -398,6 +419,11 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start", marginTop: 4,
   },
   expBadgeText: { color: "#fff", fontSize: 10, fontWeight: "700", letterSpacing: 0.4 },
+  viewBtn: {
+    width: 32, height: 32, borderRadius: 8,
+    backgroundColor: theme.colors.brandTertiary,
+    alignItems: "center", justifyContent: "center", marginRight: 4,
+  },
   chipsWrap: { height: 56, justifyContent: "center" },
   chipsRow: { paddingHorizontal: 20, gap: 8, alignItems: "center" },
   chip: {

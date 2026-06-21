@@ -367,7 +367,7 @@ CLIENT_ONBOARDING_TEMPLATES = [
     "Home Safe Guidelines",
     "Disaster Planning / Emergency Plan",
     "Auto Release",
-    "Party Payer Information",
+    "Third Party Payer Information",
     "Client's Rights & Responsibilities",
     "Authorization of Use of Personal Funds",
     "Client-Specific Medication & Dietary",
