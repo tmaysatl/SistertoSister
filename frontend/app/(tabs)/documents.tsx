@@ -12,6 +12,7 @@ import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete, API_BASE } from "@/src/api/client";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { openAuthedFile } from "@/src/utils/open-file";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -176,19 +177,7 @@ export default function Documents() {
               testID="audit-binder-button"
               onPress={async () => {
                 try {
-                  const tok = await AsyncStorage.getItem("userToken");
-                  const res = await fetch(`${API_BASE}/reports/audit-binder`, {
-                    headers: { Authorization: `Bearer ${tok}` },
-                  });
-                  const blob = await res.blob();
-                  if (Platform.OS === "web") {
-                    const url = URL.createObjectURL(blob);
-                    window.open(url, "_blank");
-                  } else {
-                    const r = new FileReader();
-                    r.onloadend = () => Linking.openURL(r.result as string);
-                    r.readAsDataURL(blob);
-                  }
+                  await openAuthedFile("/reports/audit-binder", "SisterToSister_AuditBinder.pdf");
                 } catch (e) { console.log("binder", e); }
               }}
               style={[styles.seedBtn, { backgroundColor: theme.colors.brand }]}
@@ -287,25 +276,8 @@ export default function Documents() {
           const open = async () => {
             if (!hasFile) return;
             try {
-              const token = await AsyncStorage.getItem("userToken");
-              const res = await fetch(`${API_BASE}/documents/${item.id}/stamped`, {
-                headers: { Authorization: `Bearer ${token}` },
-              });
-              const blob = await res.blob();
-              if (Platform.OS === "web") {
-                const url = URL.createObjectURL(blob);
-                window.open(url, "_blank");
-              } else {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                  const dataUrl = reader.result as string;
-                  Linking.openURL(dataUrl).catch((e) => console.log("open", e));
-                };
-                reader.readAsDataURL(blob);
-              }
-            } catch (e) {
-              console.log("open error", e);
-            }
+              await openAuthedFile(`/documents/${item.id}/stamped`, `${item.title}.pdf`);
+            } catch (e) { console.log("open error", e); }
           };
           return (
             <Pressable
