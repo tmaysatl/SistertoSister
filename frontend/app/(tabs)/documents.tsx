@@ -13,6 +13,7 @@ import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete, API_BASE } from "@/src/api/client";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { openAuthedFile } from "@/src/utils/open-file";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -66,6 +67,9 @@ export default function Documents() {
   const [shareEmail, setShareEmail] = useState("");
   const [shareCategory, setShareCategory] = useState<"client_onboarding" | "caregiver_onboarding">("client_onboarding");
   const [shareLink, setShareLink] = useState<string | null>(null);
+
+  // PDF viewer modal
+  const [viewerDoc, setViewerDoc] = useState<DocItem | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -273,12 +277,7 @@ export default function Documents() {
             expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
           const expired = expiry && expiry.getTime() < Date.now();
           const hasFile = !!item.file_base64;
-          const open = async () => {
-            if (!hasFile) return;
-            try {
-              await openAuthedFile(`/documents/${item.id}/stamped`, `${item.title}.pdf`);
-            } catch (e) { console.log("open error", e); }
-          };
+          const open = () => { if (hasFile) setViewerDoc(item); };
           return (
             <Pressable
               onPress={hasFile ? open : undefined}
@@ -598,6 +597,13 @@ export default function Documents() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      {/* PDF Viewer Modal */}
+      <PdfViewerModal
+        visible={!!viewerDoc}
+        onClose={() => setViewerDoc(null)}
+        title={viewerDoc?.title || ""}
+        path={viewerDoc ? `/documents/${viewerDoc.id}/stamped` : null}
+      />
     </SafeAreaView>
   );
 }
