@@ -15,11 +15,14 @@ type MsStatus = {
   schedule?: string;
   last_export?: {
     ok: boolean;
+    mode?: "onedrive" | "email_attachment";
     filename?: string;
     size_bytes?: number;
     ran_at?: string;
     share_url?: string;
     onedrive_web_url?: string;
+    email_sent?: boolean;
+    recipients?: string[];
   } | null;
 };
 
@@ -161,6 +164,26 @@ export function MicrosoftIntegrationCard() {
 
       <Text style={styles.subDim}>{status.schedule}</Text>
 
+      {/* Email-attachment mode badge (shown after a fallback export) */}
+      {status.last_export?.mode === "email_attachment" && (
+        <View style={styles.modeBadge}>
+          <Ionicons name="mail" size={12} color={theme.colors.brandPrimary} />
+          <Text style={styles.modeBadgeText} numberOfLines={2}>
+            Email-attachment mode (no OneDrive license on this tenant)
+          </Text>
+        </View>
+      )}
+
+      {/* Helpful hint when no recipients yet */}
+      {!status.email_to && (
+        <Pressable onPress={() => setEditEmail("")} style={styles.hintRow}>
+          <Ionicons name="information-circle-outline" size={14} color={theme.colors.warning} />
+          <Text style={styles.hintText}>
+            Add at least one email recipient so the binder has somewhere to go.
+          </Text>
+        </Pressable>
+      )}
+
       {status.last_export?.ran_at && (
         <View style={styles.lastRow}>
           <Ionicons name="checkmark-done" size={14} color={theme.colors.success} />
@@ -264,6 +287,20 @@ const styles = StyleSheet.create({
   title: { fontSize: 14, fontWeight: "700", color: theme.colors.onSurface ?? "#1d2421" },
   sub: { fontSize: 12, color: theme.colors.muted },
   subDim: { fontSize: 11, color: theme.colors.muted, marginTop: -4 },
+  modeBadge: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: theme.colors.brandTertiary,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+    marginTop: 2,
+  },
+  modeBadgeText: { fontSize: 11, fontWeight: "600", color: theme.colors.brandPrimary, flex: 1 },
+  hintRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: "#FFF6E5",
+    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 8,
+    borderWidth: 1, borderColor: "#F5D58A", marginTop: 2,
+  },
+  hintText: { fontSize: 11, color: "#8A5A00", flex: 1, fontWeight: "600" },
   lastRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 },
   lastText: { fontSize: 11, color: theme.colors.muted, flex: 1 },
   openLink: { fontSize: 11, fontWeight: "700", color: theme.colors.brandPrimary },

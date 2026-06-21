@@ -146,6 +146,7 @@ async def _ms_send_outlook_mail(
     access_token: str, to: List[str], subject: str, body_html: str,
     attachment: Optional[dict] = None,
 ) -> None:
+    """Send a simple Outlook email (small attachment <3MB supported inline)."""
     msg: dict = {
         'subject': subject,
         'body': {'contentType': 'HTML', 'content': body_html},
@@ -172,6 +173,92 @@ async def _ms_send_outlook_mail(
             )
 
 
+async def _ms_send_outlook_mail_with_large_attachment(
+    access_token: str, to: List[str], subject: str, body_html: str,
+    filename: str, content: bytes,
+) -> None:
+    """Send an Outlook email with a large attachment (up to 150MB) by:
+    1. Creating a draft message
+    2. Opening an attachment upload session
+    3. PUTting the bytes in chunks
+    4. Sending the draft
+    Exchange-backed (works even without SharePoint/OneDrive license).
+    """
+    headers = {'Authorization': f'Bearer {access_token}'}
+    json_headers = {**headers, 'Content-Type': 'application/json'}
+
+    async with httpx.AsyncClient(timeout=120) as cx:
+        # 1. Create draft
+        draft_resp = await cx.post(
+            'https://graph.microsoft.com/v1.0/me/messages',
+            headers=json_headers,
+            json={
+                'subject': subject,
+                'body': {'contentType': 'HTML', 'content': body_html},
+                'toRecipients': [
+                    {'emailAddress': {'address': a}} for a in to
+                ],
+            },
+        )
+        if draft_resp.status_code >= 400:
+            raise RuntimeError(
+                f'Outlook draft creation failed '
+                f'({draft_resp.status_code}): {draft_resp.text[:400]}'
+            )
+        message_id = draft_resp.json()['id']
+
+        # 2. Open attachment upload session
+        total = len(content)
+        sess_resp = await cx.post(
+            f'https://graph.microsoft.com/v1.0/me/messages/{message_id}'
+            f'/attachments/createUploadSession',
+            headers=json_headers,
+            json={'AttachmentItem': {
+                'attachmentType': 'file',
+                'name': filename,
+                'size': total,
+            }},
+        )
+        if sess_resp.status_code >= 400:
+            raise RuntimeError(
+                f'Outlook attachment upload session failed '
+                f'({sess_resp.status_code}): {sess_resp.text[:400]}'
+            )
+        upload_url = sess_resp.json()['uploadUrl']
+
+        # 3. PUT chunks (4MB chunks — must be multiple of 320 KiB)
+        chunk = 4 * 1024 * 1024
+        i = 0
+        while i < total:
+            end = min(i + chunk, total) - 1
+            part = content[i:end + 1]
+            r = await cx.put(
+                upload_url,
+                headers={
+                    'Content-Range': f'bytes {i}-{end}/{total}',
+                    'Content-Length': str(len(part)),
+                },
+                content=part,
+            )
+            if r.status_code not in (200, 201, 202):
+                raise RuntimeError(
+                    f'Outlook attachment chunk failed '
+                    f'{r.status_code}: {r.text[:300]}'
+                )
+            i = end + 1
+
+        # 4. Send the draft
+        send_resp = await cx.post(
+            f'https://graph.microsoft.com/v1.0/me/messages/{message_id}/send',
+            headers=headers,
+        )
+        if send_resp.status_code not in (200, 202):
+            raise RuntimeError(
+                f'Outlook send failed '
+                f'({send_resp.status_code}): {send_resp.text[:400]}'
+            )
+
+
 async def _ms_create_share_link(
     access_token: str, item_id: str,
 ) -> Optional[str]:
@@ -190,7 +277,8 @@ async def _ms_create_share_link(
 
 
 async def _ms_run_monthly_export() -> dict:
-    """Build the audit binder, upload to OneDrive, optionally email."""
+    """Build the audit binder; try OneDrive first, fall back to Outlook
+    email-with-attachment if the tenant lacks a SharePoint/OneDrive license."""
     doc = await db.integrations.find_one({'_id': MS_CONNECTION_DOC_ID})
     if not doc or not doc.get('refresh_token'):
         logger.info('MS not connected \u2014 skipping monthly export')
@@ -203,26 +291,47 @@ async def _ms_run_monthly_export() -> dict:
     pdf_bytes = await _build_audit_binder_bytes()
     stamp = datetime.now(timezone.utc).strftime('%Y-%m')
     filename = f'SisterToSister_AuditBinder_{stamp}.pdf'
+
+    # Recipients (used for email-only fallback and/or share-link email)
+    to_list = (doc.get('email_to') or '').strip()
+    addrs = [a.strip() for a in to_list.split(',') if a.strip()]
+
+    # --- Try OneDrive first ---
+    onedrive_ok = False
+    item: dict = {}
+    spo_license_missing = False
     try:
         item = await _ms_upload_to_onedrive(
             access, MS_BINDER_FOLDER, filename, pdf_bytes,
         )
+        onedrive_ok = True
     except RuntimeError as e:
-        logger.error(f'OneDrive upload failed: {e}')
-        return {'ok': False, 'reason': str(e)}
+        msg = str(e)
+        if 'SPO license' in msg or 'SharePoint' in msg or 'does not have a SPO' in msg:
+            spo_license_missing = True
+            logger.info(
+                'OneDrive unavailable (no SPO license) \u2014 '
+                'falling back to Outlook email attachment'
+            )
+        else:
+            logger.error(f'OneDrive upload failed: {e}')
+            return {'ok': False, 'reason': msg}
     except Exception as e:
         logger.exception('OneDrive upload crashed')
         return {'ok': False, 'reason': f'Upload error: {e}'}
-    web_url = item.get('webUrl')
+
+    web_url = item.get('webUrl') if onedrive_ok else None
     share_url: Optional[str] = None
-    if item.get('id'):
+    if onedrive_ok and item.get('id'):
         try:
             share_url = await _ms_create_share_link(access, item['id'])
         except Exception as e:
             logger.warning(f'MS share link failed: {e}')
-    to_list = (doc.get('email_to') or '').strip()
-    if to_list:
-        addrs = [a.strip() for a in to_list.split(',') if a.strip()]
+
+    # --- Email step ---
+    email_sent = False
+    if onedrive_ok and addrs:
+        # OneDrive worked: just email a share/download link (cheap)
         try:
             await _ms_send_outlook_mail(
                 access, addrs,
@@ -233,14 +342,53 @@ async def _ms_run_monthly_export() -> dict:
                     f'<p>File: <strong>{filename}</strong></p>'
                 ),
             )
+            email_sent = True
         except Exception as e:
-            logger.warning(f'MS sendMail failed: {e}')
+            logger.warning(f'MS sendMail (share link) failed: {e}')
+    elif spo_license_missing:
+        # OneDrive blocked by licensing: send the PDF directly as an attachment
+        if not addrs:
+            return {
+                'ok': False,
+                'reason': (
+                    'Your Microsoft tenant has no OneDrive license, so the '
+                    "binder must be emailed instead. Please add at least one "
+                    'recipient email and try again.'
+                ),
+            }
+        try:
+            await _ms_send_outlook_mail_with_large_attachment(
+                access, addrs,
+                subject=f'Sister to Sister \u2014 Audit Binder ({stamp})',
+                body_html=(
+                    '<p>Your monthly audit binder is attached.</p>'
+                    f'<p>File: <strong>{filename}</strong></p>'
+                    '<p style="font-size:12px;color:#666">'
+                    'Note: delivered as an email attachment because the '
+                    "tenant doesn't have a OneDrive license. Add a "
+                    'Microsoft 365 Business plan to enable OneDrive archive.'
+                    '</p>'
+                ),
+                filename=filename,
+                content=pdf_bytes,
+            )
+            email_sent = True
+        except Exception as e:
+            logger.exception('Outlook large attachment send failed')
+            return {
+                'ok': False,
+                'reason': f'Outlook attachment send failed: {e}',
+            }
+
     info = {
         'ok': True,
+        'mode': 'onedrive' if onedrive_ok else 'email_attachment',
         'filename': filename,
         'size_bytes': len(pdf_bytes),
         'onedrive_web_url': web_url,
         'share_url': share_url,
+        'email_sent': email_sent,
+        'recipients': addrs,
         'ran_at': now_iso(),
     }
     await _ms_save_tokens({}, extra={'last_export': info})
