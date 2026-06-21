@@ -29,6 +29,8 @@ export default function PacketView() {
   const [signDoc, setSignDoc] = useState<Doc | null>(null);
   const sigRef = useRef<SignatureViewRef>(null);
 
+  const [viewerDoc, setViewerDoc] = useState<Doc | null>(null);
+
   const load = async () => {
     setLoading(true);
     try {
@@ -39,18 +41,7 @@ export default function PacketView() {
 
   useEffect(() => { if (token) load(); }, [token]);
 
-  const open = async (doc: Doc) => {
-    const res = await fetch(`${API_BASE}/packets/${token}/document/${doc.id}`);
-    const blob = await res.blob();
-    if (Platform.OS === "web") {
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank");
-    } else {
-      const r = new FileReader();
-      r.onloadend = () => Linking.openURL(r.result as string);
-      r.readAsDataURL(blob);
-    }
-  };
+  const open = (doc: Doc) => setViewerDoc(doc);
 
   const sign = async (sigB64: string) => {
     if (!signDoc) return;
@@ -144,6 +135,15 @@ export default function PacketView() {
         )}
       </ScrollView>
 
+      <PdfViewerModal
+        visible={!!viewerDoc}
+        onClose={() => setViewerDoc(null)}
+        title={viewerDoc?.title?.replace(/^\d{2} - /, "") || ""}
+        url={viewerDoc ? `${API_BASE}/packets/${token}/document/${viewerDoc.id}` : null}
+        publicSignPath={viewerDoc ? `/packets/${token}/sign/${viewerDoc.id}` : null}
+        onSigned={load}
+      />
+
       <Modal visible={!!signDoc} transparent animationType="slide" onRequestClose={() => setSignDoc(null)}>
         <View style={styles.modalRoot}>
           <Pressable style={styles.backdrop} onPress={() => setSignDoc(null)} />
@@ -206,6 +206,12 @@ const styles = StyleSheet.create({
   modalRoot: { flex: 1, justifyContent: "flex-end" },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.5)" },
   sheet: { backgroundColor: theme.colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 32, gap: 10, height: 460 },
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: theme.colors.border, alignSelf: "center" },
+  sheetTitle: { fontSize: 18, fontWeight: "700", color: theme.colors.onSurface },
+  btn: { backgroundColor: theme.colors.brandPrimary, padding: 14, borderRadius: 12, alignItems: "center" },
+  btnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+});
+: 24, padding: 20, paddingBottom: 32, gap: 10, height: 460 },
   sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: theme.colors.border, alignSelf: "center" },
   sheetTitle: { fontSize: 18, fontWeight: "700", color: theme.colors.onSurface },
   btn: { backgroundColor: theme.colors.brandPrimary, padding: 14, borderRadius: 12, alignItems: "center" },

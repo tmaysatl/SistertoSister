@@ -10,6 +10,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiGet, apiPost, API_BASE } from "@/src/api/client";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme, BRAND_NAME } from "@/src/theme";
 
 type Detail = {
@@ -25,6 +26,7 @@ export default function ClientDetail() {
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<"tasks" | "schedule" | "team">("tasks");
+  const [showBinder, setShowBinder] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -57,14 +59,7 @@ export default function ClientDetail() {
     load();
   };
 
-  const downloadBinder = async () => {
-    const tok = await AsyncStorage.getItem("userToken");
-    const res = await fetch(`${API_BASE}/reports/audit-binder?client_id=${id}`, {
-      headers: { Authorization: `Bearer ${tok}` },
-    });
-    const blob = await res.blob();
-    if (Platform.OS === "web") window.open(URL.createObjectURL(blob), "_blank");
-  };
+  const downloadBinder = () => setShowBinder(true);
 
   const toggleTask = async (tid: string) => {
     await apiPost(`/client-tasks/${tid}/toggle`, {});
@@ -194,6 +189,12 @@ export default function ClientDetail() {
           </View>
         )}
       </ScrollView>
+      <PdfViewerModal
+        visible={showBinder}
+        onClose={() => setShowBinder(false)}
+        title={`${client.name} — Audit Binder`}
+        path={showBinder ? `/reports/audit-binder?client_id=${id}` : null}
+      />
     </SafeAreaView>
   );
 }

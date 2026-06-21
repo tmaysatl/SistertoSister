@@ -57,9 +57,7 @@ export default function Documents() {
   const [seeding, setSeeding] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  // signature
-  const [signDoc, setSignDoc] = useState<DocItem | null>(null);
-  const sigRef = useRef<SignatureViewRef>(null);
+  // signature handled inside PdfViewerModal
 
   // packet share
   const [showShare, setShowShare] = useState(false);
@@ -70,6 +68,7 @@ export default function Documents() {
 
   // PDF viewer modal
   const [viewerDoc, setViewerDoc] = useState<DocItem | null>(null);
+  const [showBinder, setShowBinder] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -179,11 +178,7 @@ export default function Documents() {
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable
               testID="audit-binder-button"
-              onPress={async () => {
-                try {
-                  await openAuthedFile("/reports/audit-binder", "SisterToSister_AuditBinder.pdf");
-                } catch (e) { console.log("binder", e); }
-              }}
+              onPress={() => setShowBinder(true)}
               style={[styles.seedBtn, { backgroundColor: theme.colors.brand }]}
             >
               <Ionicons name="document-text-outline" size={16} color="#fff" />
@@ -321,16 +316,6 @@ export default function Documents() {
                   <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
                 </Pressable>
               )}
-              {hasFile && item.mime_type === "application/pdf" && (
-                <Pressable
-                  testID={`sign-doc-${item.id}`}
-                  onPress={() => setSignDoc(item)}
-                  hitSlop={10}
-                  style={[styles.viewBtn, { backgroundColor: theme.colors.success }]}
-                >
-                  <Ionicons name="create-outline" size={18} color="#fff" />
-                </Pressable>
-              )}
               {(user?.role === "admin" || item.owner_id === user?.id) && (
                 <Pressable
                   testID={`delete-doc-${item.id}`}
@@ -442,53 +427,7 @@ export default function Documents() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Signature modal */}
-      <Modal visible={!!signDoc} transparent animationType="slide" onRequestClose={() => setSignDoc(null)}>
-        <View style={styles.modalRoot}>
-          <Pressable style={styles.backdrop} onPress={() => setSignDoc(null)} />
-          <View style={[styles.sheet, { height: 460 }]}>
-            <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle} numberOfLines={1}>Sign: {signDoc?.title}</Text>
-            <Text style={{ fontSize: 12, color: theme.colors.muted, marginBottom: 6 }}>
-              Draw your signature below. It will be applied to the bottom-right of the last page.
-            </Text>
-            <View style={{ flex: 1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, overflow: "hidden" }}>
-              <SignatureScreen
-                ref={sigRef}
-                onOK={async (sig: string) => {
-                  if (!signDoc) return;
-                  try {
-                    await apiPost(`/documents/${signDoc.id}/sign`, { signature_base64: sig });
-                    setSignDoc(null);
-                    await load();
-                  } catch (e) { console.log("sign error", e); }
-                }}
-                onEmpty={() => console.log("empty sig")}
-                webStyle={`.m-signature-pad--footer {display: none;} .m-signature-pad {box-shadow:none; border:none;} body,html { background:#fff; }`}
-                descriptionText=""
-                clearText="Clear"
-                confirmText="Save"
-              />
-            </View>
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <Pressable
-                testID="sig-clear"
-                onPress={() => sigRef.current?.clearSignature()}
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: theme.colors.surfaceTertiary }]}
-              >
-                <Text style={[styles.primaryBtnText, { color: theme.colors.onSurface }]}>Clear</Text>
-              </Pressable>
-              <Pressable
-                testID="sig-save"
-                onPress={() => sigRef.current?.readSignature()}
-                style={[styles.primaryBtn, { flex: 1 }]}
-              >
-                <Text style={styles.primaryBtnText}>Sign & Save</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Signature handled inside PdfViewerModal */}
 
       {/* Share packet modal */}
       <Modal visible={showShare} transparent animationType="slide" onRequestClose={() => setShowShare(false)}>
@@ -603,6 +542,16 @@ export default function Documents() {
         onClose={() => setViewerDoc(null)}
         title={viewerDoc?.title || ""}
         path={viewerDoc ? `/documents/${viewerDoc.id}/stamped` : null}
+        signPath={viewerDoc && viewerDoc.mime_type === "application/pdf" ? `/documents/${viewerDoc.id}/sign` : null}
+        onSigned={load}
+      />
+
+      {/* Audit Binder Viewer */}
+      <PdfViewerModal
+        visible={showBinder}
+        onClose={() => setShowBinder(false)}
+        title="Sister to Sister — Audit Binder"
+        path={showBinder ? "/reports/audit-binder" : null}
       />
     </SafeAreaView>
   );

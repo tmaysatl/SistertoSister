@@ -11,6 +11,7 @@ import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiGet, apiPost, API_BASE } from "@/src/api/client";
 import { useAuth } from "@/src/context/AuthContext";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme, BRAND_NAME } from "@/src/theme";
 
 type Detail = {
@@ -28,6 +29,7 @@ export default function CaregiverDetail() {
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<"schedule" | "clients" | "credentials" | "onboarding">("schedule");
+  const [showBinder, setShowBinder] = useState(false);
   const isSelf = user?.id === id;
   const isAdmin = user?.role === "admin";
 
@@ -63,14 +65,7 @@ export default function CaregiverDetail() {
     load();
   };
 
-  const downloadBinder = async () => {
-    const tok = await AsyncStorage.getItem("userToken");
-    const res = await fetch(`${API_BASE}/reports/audit-binder?caregiver_id=${id}`, {
-      headers: { Authorization: `Bearer ${tok}` },
-    });
-    const blob = await res.blob();
-    if (Platform.OS === "web") window.open(URL.createObjectURL(blob), "_blank");
-  };
+  const downloadBinder = () => setShowBinder(true);
 
   const clockIn = async (shiftId: string) => {
     await apiPost(`/shifts/${shiftId}/clock-in`, {});
@@ -251,6 +246,12 @@ export default function CaregiverDetail() {
           </View>
         )}
       </ScrollView>
+      <PdfViewerModal
+        visible={showBinder}
+        onClose={() => setShowBinder(false)}
+        title={`${caregiver.name} — Audit Binder`}
+        path={showBinder ? `/reports/audit-binder?caregiver_id=${id}` : null}
+      />
     </SafeAreaView>
   );
 }
