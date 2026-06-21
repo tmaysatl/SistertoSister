@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 5 — Microsoft Graph (OneDrive + Outlook) OAuth wiring + admin-only Documents-tab card. All 24 NEW backend tests in /app/backend/tests/test_iteration5_ms_graph.py PASS. Full regression suite (excluding the documented-as-pre-existing iter2 templates bitrot) is 59/59 PASS. Verified each /api/ms/* endpoint: GET /api/ms/status (admin) returns configured=true, connected=false after disconnect, schedule string 'Runs on the 1st of every month at 02:00 America/New_York'. GET /api/ms/auth-url returns a well-formed login.microsoftonline.com URL with tenant_id f8812a89… in the path, client_id 23be8faf… in query, redirect_uri ending /api/ms/callback, and scope containing offline_access + Files.ReadWrite + Mail.Send (MSAL automatically appends the reserved offline_access scope even when MS_SCOPES env doesn't include it). GET /api/ms/callback?error=access_denied returns a 400 HTML page (NOT 500) with a Cancelled message and an icon. POST /api/ms/email-recipients with comma-separated emails persists and is reflected by /api/ms/status.email_to. POST /api/ms/disconnect (admin) wipes the integration record and connected flips back to false. POST /api/ms/export-now without a stored refresh_token returns 400 with detail 'not_connected'. Caregiver token returns 403 on every /api/ms/* endpoint. Unauthenticated calls return 401/403. Regression: GET /api/reports/audit-binder still serves a valid PDF (starts with %PDF-, >1KB) and is still admin-only (caregiver 403) — the _build_audit_binder_bytes() helper refactor is sound. Other unrelated endpoints (login, documents, shifts, assignments, caregivers) all still 200. FRONTEND (390x844 mobile viewport): admin login → Documents tab shows the green 'Connect Microsoft 365' CTA card with cloud-outline icon, title 'Connect Microsoft 365', subtitle 'Auto-export the Audit Binder to OneDrive on the 1st of every month.' and chevron-forward. testID='ms-connect' resolves. Caregiver login → Documents tab does NOT render ms-connect or ms-disconnect (card correctly gated by user?.role === 'admin' on documents.tsx:256). Caregiver still sees their own add-document-button. No React Native red screens, no deprecated Expo packages introduced (msal/httpx/apscheduler are backend-only Python deps). Console only emits 2 known harmless warnings (expo-notifications web-push not supported, props.pointerEvents deprecated by RN — neither introduced by this iteration).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/ms/email-recipients", "issue": "There is no email-format / length validation on email_to. An admin can persist literally any string (e.g. 'not-an-email'). Consider validating with EmailStr-list parsing or at least re.split(',') + EmailStr per token before saving, otherwise the scheduled job may pass garbage to Outlook sendMail and fail at run time."},
+      {"endpoint": "GET /api/ms/callback", "issue": "When MSAL token exchange fails for a real (non-cancelled) reason, the HTML page exposes result.get('error_description') verbatim — which can contain the raw Microsoft URL & client request id. Low severity (admin-only flow in practice) but worth scrubbing or logging-only."},
+      {"endpoint": "MS_SCOPES env handling", "issue": "/app/backend/.env MS_SCOPES='Files.ReadWrite Mail.Send User.Read' OMITS offline_access. Today MSAL Python's ConfidentialClientApplication implicitly adds offline_access as a reserved scope so a refresh_token is still issued (verified — auth URL contains offline_access). But this is undocumented MSAL behaviour; safer to add 'offline_access' explicitly to MS_SCOPES in .env so a future MSAL upgrade can't silently break monthly refresh."},
+      {"endpoint": "POST /api/ms/export-now", "issue": "Returns HTTPException(400, res.get('reason')) so the body is {detail: 'not_connected'}. FE alerts e?.message — that surfaces 'HTTP 400' rather than the friendly 'not_connected' string. Consider returning a JSON body the FE can read for a better UX message."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "documents.tsx header row", "issues": ["With admin role, the header row already crams 4 buttons (Audit Binder, Share Packet, Templates, +). On 390-wide screens the Share Packet pill is partly clipped at the right edge (see admin_docs_card.png). Consider moving Audit Binder / Templates into an overflow menu, OR letting the row wrap. Not a regression — pre-existing layout."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_ms_graph.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "(Optional, low) Add 'offline_access' explicitly to backend/.env MS_SCOPES so future MSAL releases can't break refresh-token issuance.",
+    "(Optional, low) Validate emails in POST /api/ms/email-recipients with a list of EmailStr before persisting.",
+    "(Optional, UX) POST /api/ms/export-now: return a JSON body that the MicrosoftIntegrationCard can render as a friendly error ('Connect Microsoft 365 before running an export'), instead of bare HTTPException(400, 'not_connected').",
+    "(Optional, layout) The admin Documents header has 4 buttons + ‘+’ — Share Packet / Templates labels are clipped at 390px. Consider an overflow menu."
+  ],
+  "critical_code_review_comments": [
+    "Excellent OAuth surface: configured() guard returns 503 instead of crashing when MS_* env is missing; require_admin enforced on every /api/ms/* endpoint; redirect URI matches the public preview host so Microsoft will accept it; refresh_token is stored singleton in db.integrations and rotated on every refresh — solid.",
+    "_ms_run_monthly_export correctly degrades to {'ok': false, 'reason': 'not_connected'} or 'refresh_failed' rather than throwing — the cron job won't crash the scheduler.",
+    "OneDrive chunked upload uses upload sessions (createUploadSession + 5MB PUT chunks) so binders >4MB are supported. conflictBehavior:'replace' avoids monthly duplicates.",
+    "_build_audit_binder_bytes() helper refactor is clean: /api/reports/audit-binder still 200 with %PDF- bytes (regression test passes), and the same helper is reused by the scheduled job and POST /api/ms/export-now — DRY.",
+    "Scheduler started in @app.on_event('startup') with timezone=America/New_York, cron(day=1, hour=2, minute=0), coalesce=True, misfire_grace_time=3600 — survives short backend restarts and won't double-fire. Properly shut down in @app.on_event('shutdown').",
+    "server.py is now ~2250 lines — STRONGLY recommend splitting (e.g. routers/ms.py, routers/documents.py, routers/shifts.py). Flagged previously in iter3/iter4 — getting worse.",
+    "MicrosoftIntegrationCard.tsx: clean state machine (loading → not-configured warn / not-connected CTA / connected card). Uses Pressable + testID throughout (ms-connect, ms-disconnect, ms-export-now, ms-set-emails, ms-email-input, ms-save-emails). Polls /ms/status 5s after openURL so the card flips after OAuth tab returns.",
+    "documents.tsx correctly gates the card with `{user?.role === 'admin' && <MicrosoftIntegrationCard />}` on line 256 — verified at runtime.",
+    "Linking.addEventListener('url', …) in the card will only fire if the OAuth tab returns via a deep link. On web, window.open(_blank) doesn't deep-link back — relying on the setTimeout(load, 5000) re-poll is correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_ms_graph.py (NEW — 24 tests: status/auth-url/callback/disconnect/email-recipients/export-now + caregiver-forbidden + audit-binder regression + unauth gating)"
+  ],
+  "success_rate": {"backend": "100% (24/24 new iter5 tests; 59/59 in full suite excluding documented pre-existing iter2 bitrot)", "frontend": "100% (admin sees ms-connect CTA, caregiver does NOT, both verified at 390x844)"},
+  "seed_data_creation": "test_admin_set_email_recipients_persists writes TEST_owner@example.com,TEST_compliance@example.com and clears it in the same test. test_admin_disconnect_ok deletes the integration singleton. No long-lived test data left behind.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter5 test file: /app/backend/tests/test_iteration5_ms_graph.py. The real Microsoft OAuth consent flow is NOT exercised (interactive browser only) — the auth-url is validated structurally and the callback is hit only with error= / no-code. MS env vars in /app/backend/.env: MS_TENANT_ID=f8812a89-52c8-4470-8549-e8c4be809795, MS_CLIENT_ID=23be8faf-e8c6-4ada-98f4-ed09bd0d28aa, redirect=https://audit-prep-hub.preview.emergentagent.com/api/ms/callback. Frontend testIDs in MicrosoftIntegrationCard.tsx: ms-connect, ms-disconnect, ms-export-now, ms-set-emails, ms-email-input, ms-save-emails. Card is rendered only when user.role==='admin' (documents.tsx line 256). The 4 pre-existing iter2 templates failures remain unresolved — explicitly out of scope for iter5.",
+  "rca_of_issue": "No defects detected. MSAL warning in backend.err.log ('Your input includes offline_access; reserved list already has it') is benign — MSAL Python informs that it auto-adds the reserved scope; the auth URL still contains offline_access exactly once. Safe to ignore."
+}

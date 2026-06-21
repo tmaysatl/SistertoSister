@@ -11,6 +11,7 @@ import { useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
+import { MicrosoftIntegrationCard } from "@/src/components/MicrosoftIntegrationCard";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -251,6 +252,8 @@ export default function Documents() {
           </Pressable>
         )}
       </View>
+
+      {user?.role === "admin" && <MicrosoftIntegrationCard />}
 
       <View style={styles.chipsWrap}>
         <ScrollView
