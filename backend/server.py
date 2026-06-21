@@ -1,10 +1,12 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import io
+import base64
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
@@ -14,6 +16,11 @@ from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+import urllib.request
 
 
 ROOT_DIR = Path(__file__).parent
@@ -26,6 +33,69 @@ JWT_SECRET = os.environ['JWT_SECRET_KEY']
 JWT_ALG = os.environ.get('JWT_ALGORITHM', 'HS256')
 JWT_EXP_MIN = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', '10080'))
 EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
+LOGO_URL = "https://customer-assets.emergentagent.com/job_audit-prep-hub/artifacts/3dundaal_FullLogo_Transparent_NoBuffer_SistertoSisterPHCP.png"
+
+# Cache logo bytes once at startup
+_LOGO_BYTES: Optional[bytes] = None
+
+
+def _load_logo() -> Optional[bytes]:
+    global _LOGO_BYTES
+    if _LOGO_BYTES is None:
+        try:
+            with urllib.request.urlopen(LOGO_URL, timeout=10) as r:
+                _LOGO_BYTES = r.read()
+        except Exception as e:
+            logging.warning(f"Could not fetch logo: {e}")
+            _LOGO_BYTES = b""
+    return _LOGO_BYTES if _LOGO_BYTES else None
+
+
+def _make_watermark(viewer_name: str, ts: str, page_w: float, page_h: float) -> bytes:
+    """Create a single-page transparent watermark PDF with logo + footer."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(page_w, page_h))
+    # Diagonal brand text watermark (light)
+    c.saveState()
+    c.translate(page_w / 2, page_h / 2)
+    c.rotate(35)
+    try:
+        c.setFillColorRGB(0.40, 0.12, 0.12, alpha=0.10)
+    except TypeError:
+        c.setFillColorRGB(0.40, 0.12, 0.12)
+    c.setFont("Helvetica-Bold", 48)
+    c.drawCentredString(0, 0, "SISTER TO SISTER, PHCP")
+    c.restoreState()
+    # Header logo + footer audit trail
+    logo = _load_logo()
+    if logo:
+        try:
+            img = ImageReader(io.BytesIO(logo))
+            c.drawImage(img, page_w - 80, page_h - 50, width=60, height=40,
+                        preserveAspectRatio=True, mask='auto')
+        except Exception as e:
+            logging.warning(f"Logo draw error: {e}")
+    c.setFillColorRGB(0.20, 0.20, 0.20)
+    c.setFont("Helvetica", 7)
+    c.drawString(20, 12, f"Sister to Sister, PHCP  ·  Viewed by {viewer_name}  ·  {ts}")
+    c.drawRightString(page_w - 20, 12, "AUDIT TRAIL")
+    c.save()
+    return buf.getvalue()
+
+
+def stamp_pdf(pdf_bytes: bytes, viewer_name: str, ts: str) -> bytes:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    for page in reader.pages:
+        w = float(page.mediabox.width)
+        h = float(page.mediabox.height)
+        wm_reader = PdfReader(io.BytesIO(_make_watermark(viewer_name, ts, w, h)))
+        wm_page = wm_reader.pages[0]
+        page.merge_page(wm_page)
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
 
 # DB
 client = AsyncIOMotorClient(MONGO_URL)
@@ -356,6 +426,118 @@ async def delete_document(doc_id: str, _: UserPublic = Depends(require_admin)):
     return {"ok": True}
 
 
+@api.get("/documents/{doc_id}/stamped")
+async def get_stamped_document(
+    doc_id: str,
+    token: Optional[str] = None,
+    current: UserPublic = Depends(get_current_user),
+):
+    """Return the document with Sister to Sister watermark + audit trail footer."""
+    d = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Document not found")
+    if not d.get("file_base64"):
+        raise HTTPException(404, "No file attached")
+    raw = base64.b64decode(d["file_base64"])
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if (d.get("mime_type") or "").lower() == "application/pdf":
+        try:
+            stamped = stamp_pdf(raw, current.name, ts)
+        except Exception as e:
+            logger.error(f"stamp error: {e}")
+            stamped = raw
+    else:
+        stamped = raw
+    # log view for audit
+    await db.document_views.insert_one({
+        "id": str(uuid.uuid4()),
+        "document_id": doc_id,
+        "viewer_id": current.id,
+        "viewer_name": current.name,
+        "viewed_at": now_iso(),
+    })
+    return Response(
+        content=stamped,
+        media_type=d.get("mime_type") or "application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{d["title"]}.pdf"'},
+    )
+
+
+@api.post("/documents/{doc_id}/sign")
+async def sign_document(
+    doc_id: str,
+    payload: dict,
+    current: UserPublic = Depends(get_current_user),
+):
+    """Apply a drawn signature image (base64 PNG) onto the LAST page of the PDF
+    in the bottom-right and persist as a new document under the signer."""
+    d = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not d or not d.get("file_base64"):
+        raise HTTPException(404, "Document not found")
+    sig_b64 = (payload.get("signature_base64") or "").strip()
+    if not sig_b64:
+        raise HTTPException(400, "signature_base64 required")
+    if sig_b64.startswith("data:"):
+        sig_b64 = sig_b64.split(",", 1)[1]
+    try:
+        sig_bytes = base64.b64decode(sig_b64)
+    except Exception:
+        raise HTTPException(400, "invalid signature_base64")
+
+    raw = base64.b64decode(d["file_base64"])
+    reader = PdfReader(io.BytesIO(raw))
+    writer = PdfWriter()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    for i, page in enumerate(reader.pages):
+        w = float(page.mediabox.width)
+        h = float(page.mediabox.height)
+        if i == len(reader.pages) - 1:
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=(w, h))
+            try:
+                img = ImageReader(io.BytesIO(sig_bytes))
+                c.drawImage(img, w - 230, 60, width=200, height=70,
+                            preserveAspectRatio=True, mask='auto')
+            except Exception as e:
+                logger.error(f"signature draw error: {e}")
+            c.setFillColorRGB(0.2, 0.2, 0.2)
+            c.setFont("Helvetica", 8)
+            c.drawString(w - 230, 50, f"Signed: {current.name}")
+            c.drawString(w - 230, 38, f"{ts}")
+            c.save()
+            overlay = PdfReader(io.BytesIO(buf.getvalue())).pages[0]
+            page.merge_page(overlay)
+        writer.add_page(page)
+
+    out = io.BytesIO()
+    writer.write(out)
+    new_b64 = base64.b64encode(out.getvalue()).decode()
+
+    signed = Document(
+        title=f"{d['title']} (signed by {current.name})",
+        category=d["category"],
+        owner_id=current.id,
+        owner_type="caregiver" if current.role == "caregiver" else "agency",
+        file_base64=new_b64,
+        mime_type="application/pdf",
+        notes=f"Signed by {current.name} on {ts}",
+        uploaded_by=current.id,
+        seq=d.get("seq"),
+        is_template=False,
+    )
+    await db.documents.insert_one(signed.dict())
+    await db.document_views.insert_one({
+        "id": str(uuid.uuid4()),
+        "document_id": doc_id,
+        "viewer_id": current.id,
+        "viewer_name": current.name,
+        "action": "signed",
+        "viewed_at": now_iso(),
+    })
+    return signed
+
+
 # ---------- STANDARD ONBOARDING TEMPLATES (admin) ----------
 CLIENT_ONBOARDING_TEMPLATES = [
     "Welcome Letter",
@@ -590,6 +772,207 @@ async def toggle_step(step_id: str, current: UserPublic = Depends(get_current_us
 async def delete_step(step_id: str, _: UserPublic = Depends(require_admin)):
     await db.onboarding.delete_one({"id": step_id})
     return {"ok": True}
+
+
+class BulkAssignReq(BaseModel):
+    caregiver_id: str
+
+
+@api.post("/onboarding/bulk-assign")
+async def bulk_assign_onboarding(req: BulkAssignReq,
+                                 _: UserPublic = Depends(require_admin)):
+    """Auto-create an onboarding step per caregiver_onboarding document.
+
+    Skips steps already created for that caregiver (idempotent).
+    """
+    cg = await db.users.find_one({"id": req.caregiver_id, "role": "caregiver"})
+    if not cg:
+        raise HTTPException(404, "Caregiver not found")
+
+    docs = await db.documents.find(
+        {"category": "caregiver_onboarding"}, {"_id": 0}
+    ).sort("seq", 1).to_list(200)
+
+    created = 0
+    for d in docs:
+        existing = await db.onboarding.find_one({
+            "caregiver_id": req.caregiver_id,
+            "title": d["title"],
+        })
+        if existing:
+            continue
+        step = OnboardingStep(
+            caregiver_id=req.caregiver_id,
+            title=d["title"],
+            description=f"Review and sign: {d['title']}",
+        )
+        await db.onboarding.insert_one(step.dict())
+        created += 1
+    return {"created": created, "total_steps": len(docs)}
+
+
+# ---------- PACKET SHARE LINK ----------
+class PacketLinkReq(BaseModel):
+    recipient_name: str
+    recipient_role: Literal["client", "caregiver"]
+    category: Literal["client_onboarding", "caregiver_onboarding"]
+    delivery: Optional[Literal["email", "sms", "link"]] = "link"
+    recipient_email: Optional[EmailStr] = None
+    recipient_phone: Optional[str] = None
+
+
+@api.post("/packets/share")
+async def share_packet(req: PacketLinkReq,
+                       current: UserPublic = Depends(require_admin)):
+    """Create a tokenized share link for the entire numbered packet.
+
+    Returns the link; delivery via email/SMS is added in a follow-up.
+    """
+    token_str = uuid.uuid4().hex
+    pkt = {
+        "id": str(uuid.uuid4()),
+        "token": token_str,
+        "recipient_name": req.recipient_name,
+        "recipient_role": req.recipient_role,
+        "category": req.category,
+        "recipient_email": req.recipient_email,
+        "recipient_phone": req.recipient_phone,
+        "created_by": current.id,
+        "created_at": now_iso(),
+        "viewed_at": None,
+        "completed_at": None,
+        "signed_ids": [],
+    }
+    await db.packet_shares.insert_one(pkt)
+
+    # Public link (frontend will route /packet/<token>)
+    frontend_origin = os.environ.get("PUBLIC_APP_ORIGIN", "")
+    link = f"{frontend_origin}/packet/{token_str}" if frontend_origin else f"/packet/{token_str}"
+
+    return {
+        "token": token_str,
+        "link": link,
+        "delivery": req.delivery or "link",
+        "delivered": False,
+        "note": "Email / SMS delivery pending integration choice.",
+    }
+
+
+@api.get("/packets/{token_str}")
+async def get_packet(token_str: str):
+    """Public endpoint: fetch packet metadata + numbered docs (no PDFs)."""
+    pkt = await db.packet_shares.find_one({"token": token_str}, {"_id": 0})
+    if not pkt:
+        raise HTTPException(404, "Packet not found")
+    if not pkt.get("viewed_at"):
+        await db.packet_shares.update_one(
+            {"token": token_str}, {"$set": {"viewed_at": now_iso()}}
+        )
+    docs = await db.documents.find(
+        {"category": pkt["category"]}, {"_id": 0, "file_base64": 0}
+    ).sort("seq", 1).to_list(200)
+    return {"packet": pkt, "documents": docs}
+
+
+@api.get("/packets/{token_str}/document/{doc_id}")
+async def packet_doc_stamped(token_str: str, doc_id: str):
+    """Public — return the stamped PDF for a packet recipient."""
+    pkt = await db.packet_shares.find_one({"token": token_str})
+    if not pkt:
+        raise HTTPException(404, "Packet not found")
+    d = await db.documents.find_one(
+        {"id": doc_id, "category": pkt["category"]}, {"_id": 0}
+    )
+    if not d or not d.get("file_base64"):
+        raise HTTPException(404, "Document not found")
+    raw = base64.b64decode(d["file_base64"])
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        stamped = stamp_pdf(raw, pkt["recipient_name"], ts)
+    except Exception:
+        stamped = raw
+    return Response(
+        content=stamped,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{d["title"]}.pdf"'},
+    )
+
+
+@api.post("/packets/{token_str}/sign/{doc_id}")
+async def packet_sign(token_str: str, doc_id: str, payload: dict):
+    """Public — submit a drawn signature for a packet document."""
+    pkt = await db.packet_shares.find_one({"token": token_str}, {"_id": 0})
+    if not pkt:
+        raise HTTPException(404, "Packet not found")
+    sig = (payload.get("signature_base64") or "").strip()
+    if sig.startswith("data:"):
+        sig = sig.split(",", 1)[1]
+    if not sig:
+        raise HTTPException(400, "signature_base64 required")
+    try:
+        sig_bytes = base64.b64decode(sig)
+    except Exception:
+        raise HTTPException(400, "invalid signature")
+
+    d = await db.documents.find_one(
+        {"id": doc_id, "category": pkt["category"]}, {"_id": 0}
+    )
+    if not d or not d.get("file_base64"):
+        raise HTTPException(404, "Document not found")
+
+    raw = base64.b64decode(d["file_base64"])
+    reader = PdfReader(io.BytesIO(raw))
+    writer = PdfWriter()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    for i, page in enumerate(reader.pages):
+        w = float(page.mediabox.width)
+        h = float(page.mediabox.height)
+        if i == len(reader.pages) - 1:
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=(w, h))
+            try:
+                img = ImageReader(io.BytesIO(sig_bytes))
+                c.drawImage(img, w - 230, 60, width=200, height=70,
+                            preserveAspectRatio=True, mask='auto')
+            except Exception as e:
+                logger.error(f"sig draw: {e}")
+            c.setFillColorRGB(0.2, 0.2, 0.2)
+            c.setFont("Helvetica", 8)
+            c.drawString(w - 230, 50, f"Signed: {pkt['recipient_name']}")
+            c.drawString(w - 230, 38, f"{ts}")
+            c.save()
+            overlay = PdfReader(io.BytesIO(buf.getvalue())).pages[0]
+            page.merge_page(overlay)
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    new_b64 = base64.b64encode(out.getvalue()).decode()
+
+    signed_doc = Document(
+        title=f"{d['title']} (signed by {pkt['recipient_name']})",
+        category=d["category"],
+        owner_id=pkt["token"],  # link signed copy back to the packet
+        owner_type="agency",
+        file_base64=new_b64,
+        mime_type="application/pdf",
+        notes=f"Signed via packet link by {pkt['recipient_name']} on {ts}",
+        uploaded_by="public-share",
+        seq=d.get("seq"),
+        is_template=False,
+    )
+    await db.documents.insert_one(signed_doc.dict())
+    await db.packet_shares.update_one(
+        {"token": token_str},
+        {"$addToSet": {"signed_ids": doc_id}},
+    )
+    # mark complete if all signed
+    total = await db.documents.count_documents({"category": pkt["category"]})
+    refreshed = await db.packet_shares.find_one({"token": token_str})
+    if refreshed and len(refreshed.get("signed_ids", [])) >= total:
+        await db.packet_shares.update_one(
+            {"token": token_str}, {"$set": {"completed_at": now_iso()}}
+        )
+    return {"ok": True, "signed_doc_id": signed_doc.id}
 
 
 # ---------- DASHBOARD STATS ----------
