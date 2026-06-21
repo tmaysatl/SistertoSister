@@ -86,6 +86,23 @@ async def _ms_upload_to_onedrive(
     headers = {'Authorization': f'Bearer {access_token}'}
     path = f'/me/drive/root:/{folder}/{filename}:/createUploadSession'
     async with httpx.AsyncClient(timeout=120) as cx:
+        # Pre-flight: confirm the user actually has a OneDrive provisioned.
+        # A "no OneDrive" account is the #1 cause of generic 400s here.
+        drive_check = await cx.get(
+            'https://graph.microsoft.com/v1.0/me/drive', headers=headers,
+        )
+        if drive_check.status_code == 404:
+            raise RuntimeError(
+                'This Microsoft account does not have OneDrive provisioned. '
+                'Sign in to https://onedrive.live.com once to set it up, '
+                'or use an account with a Microsoft 365 / OneDrive license.'
+            )
+        if drive_check.status_code >= 400:
+            raise RuntimeError(
+                f'Microsoft Graph could not access OneDrive '
+                f'({drive_check.status_code}): {drive_check.text[:300]}'
+            )
+
         sess = await cx.post(
             f'https://graph.microsoft.com/v1.0{path}',
             headers={**headers, 'Content-Type': 'application/json'},
@@ -94,7 +111,11 @@ async def _ms_upload_to_onedrive(
                 'name': filename,
             }},
         )
-        sess.raise_for_status()
+        if sess.status_code >= 400:
+            raise RuntimeError(
+                f'OneDrive createUploadSession failed '
+                f'({sess.status_code}): {sess.text[:400]}'
+            )
         upload_url = sess.json()['uploadUrl']
         chunk = 5 * 1024 * 1024
         total = len(content)
@@ -182,9 +203,16 @@ async def _ms_run_monthly_export() -> dict:
     pdf_bytes = await _build_audit_binder_bytes()
     stamp = datetime.now(timezone.utc).strftime('%Y-%m')
     filename = f'SisterToSister_AuditBinder_{stamp}.pdf'
-    item = await _ms_upload_to_onedrive(
-        access, MS_BINDER_FOLDER, filename, pdf_bytes,
-    )
+    try:
+        item = await _ms_upload_to_onedrive(
+            access, MS_BINDER_FOLDER, filename, pdf_bytes,
+        )
+    except RuntimeError as e:
+        logger.error(f'OneDrive upload failed: {e}')
+        return {'ok': False, 'reason': str(e)}
+    except Exception as e:
+        logger.exception('OneDrive upload crashed')
+        return {'ok': False, 'reason': f'Upload error: {e}'}
     web_url = item.get('webUrl')
     share_url: Optional[str] = None
     if item.get('id'):
