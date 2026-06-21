@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput, Modal,
   ActivityIndicator, RefreshControl, KeyboardAvoidingView, Platform, FlatList,
@@ -8,8 +8,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import { useFocusEffect } from "expo-router";
+import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { useAuth } from "@/src/context/AuthContext";
-import { apiGet, apiPost, apiDelete } from "@/src/api/client";
+import { apiGet, apiPost, apiDelete, API_BASE } from "@/src/api/client";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -52,6 +54,17 @@ export default function Documents() {
   const [credTemplates, setCredTemplates] = useState<string[]>([]);
   const [seeding, setSeeding] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  // signature
+  const [signDoc, setSignDoc] = useState<DocItem | null>(null);
+  const sigRef = useRef<SignatureViewRef>(null);
+
+  // packet share
+  const [showShare, setShowShare] = useState(false);
+  const [shareName, setShareName] = useState("");
+  const [shareEmail, setShareEmail] = useState("");
+  const [shareCategory, setShareCategory] = useState<"client_onboarding" | "caregiver_onboarding">("client_onboarding");
+  const [shareLink, setShareLink] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -160,6 +173,14 @@ export default function Documents() {
         {user?.role === "admin" && (
           <View style={{ flexDirection: "row", gap: 8 }}>
             <Pressable
+              testID="share-packet-button"
+              onPress={() => { setShareLink(null); setShowShare(true); }}
+              style={styles.seedBtn}
+            >
+              <Ionicons name="paper-plane-outline" size={16} color={theme.colors.brandPrimary} />
+              <Text style={styles.seedBtnText}>Share Packet</Text>
+            </Pressable>
+            <Pressable
               testID="seed-templates-button"
               onPress={seedTemplates}
               disabled={seeding}
@@ -170,7 +191,7 @@ export default function Documents() {
               ) : (
                 <>
                   <Ionicons name="download-outline" size={16} color={theme.colors.brandPrimary} />
-                  <Text style={styles.seedBtnText}>Load Templates</Text>
+                  <Text style={styles.seedBtnText}>Templates</Text>
                 </>
               )}
             </Pressable>
@@ -239,10 +260,28 @@ export default function Documents() {
             expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
           const expired = expiry && expiry.getTime() < Date.now();
           const hasFile = !!item.file_base64;
-          const open = () => {
+          const open = async () => {
             if (!hasFile) return;
-            const url = `data:${item.mime_type || "application/pdf"};base64,${item.file_base64}`;
-            Linking.openURL(url).catch((e) => console.log("open error", e));
+            try {
+              const token = await AsyncStorage.getItem("userToken");
+              const res = await fetch(`${API_BASE}/documents/${item.id}/stamped`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              const blob = await res.blob();
+              if (Platform.OS === "web") {
+                const url = URL.createObjectURL(blob);
+                window.open(url, "_blank");
+              } else {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  const dataUrl = reader.result as string;
+                  Linking.openURL(dataUrl).catch((e) => console.log("open", e));
+                };
+                reader.readAsDataURL(blob);
+              }
+            } catch (e) {
+              console.log("open error", e);
+            }
           };
           return (
             <Pressable
@@ -285,6 +324,16 @@ export default function Documents() {
               {hasFile && (
                 <Pressable testID={`view-doc-${item.id}`} onPress={open} hitSlop={10} style={styles.viewBtn}>
                   <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
+                </Pressable>
+              )}
+              {hasFile && item.mime_type === "application/pdf" && (
+                <Pressable
+                  testID={`sign-doc-${item.id}`}
+                  onPress={() => setSignDoc(item)}
+                  hitSlop={10}
+                  style={[styles.viewBtn, { backgroundColor: theme.colors.success }]}
+                >
+                  <Ionicons name="create-outline" size={18} color="#fff" />
                 </Pressable>
               )}
               {(user?.role === "admin" || item.owner_id === user?.id) && (
@@ -397,6 +446,162 @@ export default function Documents() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Signature modal */}
+      <Modal visible={!!signDoc} transparent animationType="slide" onRequestClose={() => setSignDoc(null)}>
+        <View style={styles.modalRoot}>
+          <Pressable style={styles.backdrop} onPress={() => setSignDoc(null)} />
+          <View style={[styles.sheet, { height: 460 }]}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle} numberOfLines={1}>Sign: {signDoc?.title}</Text>
+            <Text style={{ fontSize: 12, color: theme.colors.muted, marginBottom: 6 }}>
+              Draw your signature below. It will be applied to the bottom-right of the last page.
+            </Text>
+            <View style={{ flex: 1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, overflow: "hidden" }}>
+              <SignatureScreen
+                ref={sigRef}
+                onOK={async (sig: string) => {
+                  if (!signDoc) return;
+                  try {
+                    await apiPost(`/documents/${signDoc.id}/sign`, { signature_base64: sig });
+                    setSignDoc(null);
+                    await load();
+                  } catch (e) { console.log("sign error", e); }
+                }}
+                onEmpty={() => console.log("empty sig")}
+                webStyle={`.m-signature-pad--footer {display: none;} .m-signature-pad {box-shadow:none; border:none;} body,html { background:#fff; }`}
+                descriptionText=""
+                clearText="Clear"
+                confirmText="Save"
+              />
+            </View>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+              <Pressable
+                testID="sig-clear"
+                onPress={() => sigRef.current?.clearSignature()}
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: theme.colors.surfaceTertiary }]}
+              >
+                <Text style={[styles.primaryBtnText, { color: theme.colors.onSurface }]}>Clear</Text>
+              </Pressable>
+              <Pressable
+                testID="sig-save"
+                onPress={() => sigRef.current?.readSignature()}
+                style={[styles.primaryBtn, { flex: 1 }]}
+              >
+                <Text style={styles.primaryBtnText}>Sign & Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Share packet modal */}
+      <Modal visible={showShare} transparent animationType="slide" onRequestClose={() => setShowShare(false)}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalRoot}
+        >
+          <Pressable style={styles.backdrop} onPress={() => setShowShare(false)} />
+          <View style={styles.sheet}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>Share onboarding packet</Text>
+            <Text style={{ fontSize: 12, color: theme.colors.muted }}>
+              Generate a personalized link the recipient can use to view & sign the entire numbered packet on any device — no login required.
+            </Text>
+
+            <Text style={styles.fieldLabel}>Packet type</Text>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              {[
+                { k: "client_onboarding", l: "Client (13)" },
+                { k: "caregiver_onboarding", l: "Caregiver (14)" },
+              ].map((p) => {
+                const active = shareCategory === p.k;
+                return (
+                  <Pressable
+                    key={p.k}
+                    testID={`share-cat-${p.k}`}
+                    onPress={() => setShareCategory(p.k as any)}
+                    style={[styles.chip, active && styles.chipActive, { flex: 1, justifyContent: "center" }]}
+                  >
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{p.l}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={styles.fieldLabel}>Recipient name</Text>
+            <TextInput
+              testID="share-name-input"
+              value={shareName} onChangeText={setShareName}
+              placeholder="Jane Doe"
+              placeholderTextColor={theme.colors.muted}
+              style={styles.input}
+            />
+            <Text style={styles.fieldLabel}>Recipient email (optional)</Text>
+            <TextInput
+              testID="share-email-input"
+              value={shareEmail} onChangeText={setShareEmail}
+              placeholder="jane@example.com"
+              placeholderTextColor={theme.colors.muted}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              style={styles.input}
+            />
+
+            {!shareLink ? (
+              <Pressable
+                testID="share-generate-btn"
+                disabled={!shareName.trim()}
+                onPress={async () => {
+                  try {
+                    const r = await apiPost<{ link: string }>("/packets/share", {
+                      recipient_name: shareName.trim(),
+                      recipient_role: shareCategory === "client_onboarding" ? "client" : "caregiver",
+                      category: shareCategory,
+                      delivery: "link",
+                      recipient_email: shareEmail.trim() || null,
+                    });
+                    setShareLink(r.link);
+                  } catch (e) { console.log("share err", e); }
+                }}
+                style={[styles.primaryBtn, !shareName.trim() && { opacity: 0.5 }]}
+              >
+                <Text style={styles.primaryBtnText}>Generate link</Text>
+              </Pressable>
+            ) : (
+              <View style={{ gap: 8 }}>
+                <Text style={styles.fieldLabel}>Personalized link (tap to copy)</Text>
+                <Pressable
+                  testID="share-link-copy"
+                  onPress={() => {
+                    if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.clipboard) {
+                      navigator.clipboard.writeText(shareLink);
+                    }
+                  }}
+                  style={[styles.input, { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brandPrimary }]}
+                >
+                  <Text selectable style={{ fontSize: 13, color: theme.colors.brandPrimary, fontWeight: "600" }}>
+                    {shareLink}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  testID="share-open-btn"
+                  onPress={() => Linking.openURL(shareLink)}
+                  style={[styles.primaryBtn, { backgroundColor: theme.colors.success }]}
+                >
+                  <Text style={styles.primaryBtnText}>Open preview</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setShareLink(null); setShareName(""); setShareEmail(""); }}
+                  style={styles.secondaryBtn}
+                >
+                  <Text style={styles.secondaryBtnText}>Generate another</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -424,6 +629,10 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.brandTertiary,
     alignItems: "center", justifyContent: "center", marginRight: 4,
   },
+  modalRoot: { flex: 1, justifyContent: "flex-end" },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.4)" },
+  secondaryBtn: { padding: 12, alignItems: "center" },
+  secondaryBtnText: { color: theme.colors.brandPrimary, fontWeight: "600", fontSize: 14 },
   chipsWrap: { height: 56, justifyContent: "center" },
   chipsRow: { paddingHorizontal: 20, gap: 8, alignItems: "center" },
   chip: {

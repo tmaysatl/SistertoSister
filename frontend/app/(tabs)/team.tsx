@@ -182,6 +182,11 @@ export default function Team() {
           ListEmptyComponent={!loading ? <Empty text="No caregivers yet" /> : null}
           renderItem={({ item }) => {
             const assigned = assignments.filter((a) => a.caregiver_id === item.id);
+            const myStepCount = steps.filter((s) => s.caregiver_id === item.id).length;
+            const bulk = async () => {
+              await apiPost(`/onboarding/bulk-assign`, { caregiver_id: item.id });
+              load();
+            };
             return (
               <View style={styles.row} testID={`caregiver-${item.id}`}>
                 <View style={[styles.rowIcon, { backgroundColor: theme.colors.brandTertiary }]}>
@@ -191,9 +196,17 @@ export default function Team() {
                   <Text style={styles.rowTitle}>{item.name}</Text>
                   <Text style={styles.rowSub}>{item.email}</Text>
                   <Text style={[styles.rowSub, { marginTop: 4, fontWeight: "600" }]}>
-                    {assigned.length} active assignment{assigned.length === 1 ? "" : "s"}
+                    {assigned.length} assignment{assigned.length === 1 ? "" : "s"} · {myStepCount} onboarding step{myStepCount === 1 ? "" : "s"}
                   </Text>
                 </View>
+                <Pressable
+                  testID={`bulk-assign-${item.id}`}
+                  onPress={bulk}
+                  style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10, backgroundColor: theme.colors.brandPrimary }}
+                  hitSlop={6}
+                >
+                  <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>Assign Packet</Text>
+                </Pressable>
               </View>
             );
           }}

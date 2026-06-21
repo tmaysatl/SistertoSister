@@ -18,6 +18,8 @@ function RootGate() {
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === "(auth)";
+    const inPublicGroup = segments[0] === "packet";
+    if (inPublicGroup) return;
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/login");
     } else if (user && inAuthGroup) {
