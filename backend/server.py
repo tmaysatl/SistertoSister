@@ -2192,7 +2192,12 @@ async def ms_email_recipients(req: MsEmailReq,
 async def ms_export_now(current: UserPublic = Depends(require_admin)):
     res = await _ms_run_monthly_export()
     if not res.get("ok"):
-        raise HTTPException(400, res.get("reason", "Export failed"))
+        reason = res.get("reason", "Export failed")
+        msg = {
+            "not_connected": "Please connect Microsoft 365 first.",
+            "refresh_failed": "Microsoft session expired. Please reconnect.",
+        }.get(reason, reason)
+        raise HTTPException(400, msg)
     return res
 
 
