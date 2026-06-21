@@ -399,8 +399,8 @@ from playbook_pdf import build_playbook_pdf, build_intake_form_pdf
 
 
 @api.get("/reports/replication-playbook.pdf")
-async def replication_playbook_pdf(_: UserPublic = Depends(require_admin)):
-    """Branded reference PDF for replicating the app for new agencies."""
+async def replication_playbook_pdf():
+    """Public download — generic replication playbook (no agency data)."""
     pdf = build_playbook_pdf()
     return Response(
         content=pdf, media_type="application/pdf",
@@ -410,10 +410,8 @@ async def replication_playbook_pdf(_: UserPublic = Depends(require_admin)):
 
 
 @api.get("/reports/replication-intake-form.pdf")
-async def replication_intake_form_pdf(_: UserPublic = Depends(require_admin)):
-    """Fillable AcroForm PDF that a new agency can complete to start a
-    replication. Open in Adobe Reader / Preview, fill in the fields, save,
-    and send back."""
+async def replication_intake_form_pdf():
+    """Public download — blank fillable intake form (no agency data)."""
     pdf = build_intake_form_pdf()
     return Response(
         content=pdf, media_type="application/pdf",
