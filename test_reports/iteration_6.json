@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 6 — REFACTOR-ONLY backend regression. Server split into core/{settings,db,security,push,pdf_utils}.py + models.py + routers/{shifts,ms_graph}.py with server.py shrinking from ~2250 to 1390 lines. Verified module-path identity (/api/shifts/* endpoints all resolve to routers.shifts.*, /api/ms/* endpoints all resolve to routers.ms_graph.*). FastAPI OpenAPI exposes 54 paths — identical to the iter-5 surface (auth, clients, caregivers, documents, doc push, assignments, training, onboarding, shifts/recurring/clock, ms/*, audit binder, packets share, chat, stats, assistant, register-push). Boot log line 'MS Graph monthly export scheduler started (1st of month, 02:00 America/New_York)' now emitted by routers.ms_graph (was server). Cold start measured at ~860 ms (well under 5 s). Full regression: 69/74 PASS (93.2%). 4 failures are the pre-existing iter-2 seed-templates drift (admin-rebrand pollution: 11 caregiver_onboarding & 11 policy stubs instead of 12/10, idempotent reseed creates 11) which the review request explicitly says is OK to ignore. 1 NEW regression introduced by the refactor: POST /api/ms/export-now without a stored refresh_token now returns detail='Please connect Microsoft 365 first.' instead of the iter-5 detail='not_connected'. This is a behavior change — the previous code did `HTTPException(400, res.get('reason'))` (raw token), the new routers/ms_graph.py:351 maps the reason to a friendly message before raising. Review request says 'zero behavior change, identical responses', so this needs reverting to keep the raw 'not_connected' / 'refresh_failed' tokens.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/ms/export-now", "issue": "Refactor changed error detail string. routers/ms_graph.py:356-360 maps reason→friendly message before raising HTTPException(400). Previous behavior (iter-5) was raw token, e.g. detail='not_connected'. Now detail='Please connect Microsoft 365 first.'. Breaks contract assertion `'not_connected' in detail.lower()`. Either (a) revert to `raise HTTPException(400, res.get('reason') or 'Export failed')`, or (b) keep the friendlier message AND update test_iteration5_ms_graph.py::test_admin_export_without_connection_returns_400_not_connected to match. Since this is a REFACTOR-ONLY pass, (a) is the right call."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_healthguard_api.py",
+    "/app/backend/tests/test_iteration2_templates_credentials.py",
+    "/app/backend/tests/test_iteration3_push_and_assignments.py",
+    "/app/backend/tests/test_iteration4_shifts.py",
+    "/app/backend/tests/test_iteration5_ms_graph.py",
+    "/app/test_reports/pytest/iteration6_results.xml"
+  ],
+  "action_items": [
+    "Revert routers/ms_graph.py ms_export_now() to raise HTTPException(400, res.get('reason') or 'Export failed') to preserve the iter-5 raw 'not_connected' / 'refresh_failed' detail tokens — refactor pass must not change response shapes.",
+    "(Pre-existing, NOT introduced by this refactor) iter-2 seed-templates drift: extra '01 - Code of Conduct' policy stub + extra orphan caregiver_onboarding entry, and seed reseed isn't idempotent (creates 11 on the 2nd call). Confirmed already documented in iter_2/iter_5 reports — safe to defer."
+  ],
+  "critical_code_review_comments": [
+    "server.py is still 1390 lines — could be reduced further by extracting auth/clients/documents/training/onboarding/chat routers in a follow-up pass, but acceptable for this iteration.",
+    "Good: core/db.py, core/security.py, core/push.py, core/pdf_utils.py, core/settings.py are all small, focused, and have no circular imports. models.py is a clean shared Pydantic layer.",
+    "Good: routers/shifts.py and routers/ms_graph.py both import shared deps via `from core.*` and `from models import *` — no duplication.",
+    "Good: server.py app.include_router(shifts_router.router, prefix='/api') and same for ms_graph_router preserve the /api/* surface exactly.",
+    "Good: startup hook in server.py calls routers.ms_graph.start_scheduler(), which logs from its own module — verified in backend.err.log.",
+    "Concern: ms_export_now() error-message remapping (routers/ms_graph.py:356-360) is a silent behavior change that wouldn't be flagged by humans diff-reading a 'refactor' commit. See action_items #1."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "93.2% (69/74); excluding pre-existing iter-2 drift: 98.6% (69/70)", "frontend": "N/A — backend-only review"},
+  "seed_data_creation": "None. Used existing seeded admin@healthguard.com / caregiver@healthguard.com.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Only outstanding refactor-introduced regression is the /api/ms/export-now detail-string change. Once main agent reverts to raw `res.get('reason')`, re-run only tests/test_iteration5_ms_graph.py::TestMsExportNow::test_admin_export_without_connection_returns_400_not_connected to confirm. Everything else is green or pre-existing. Module-path checks (routers.shifts / routers.ms_graph), 54-endpoint OpenAPI surface, ~860 ms cold start, and scheduler boot log are all verified.",
+  "rca_of_issue": "The /api/ms/export-now behavior change is RCA'd: in iter-5 server.py raised `HTTPException(400, res.get('reason'))` so the detail was the raw token ('not_connected' or 'refresh_failed'). During refactor, routers/ms_graph.py:354-360 introduced a reason→friendly-message dict lookup before raising. This was listed as an OPTIONAL UX improvement in iter-5 action_items but the current request is REFACTOR-ONLY with zero behavior change required. Fix: replace the dict-map block with `raise HTTPException(400, res.get('reason') or 'Export failed')`. Test then passes without modification."
+}
