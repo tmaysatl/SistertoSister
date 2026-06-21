@@ -72,9 +72,18 @@ export default function Dashboard() {
                   <Text style={styles.heroName}>{user?.name}</Text>
                 </View>
               </View>
-              <Pressable testID="logout-button" onPress={logout} style={styles.iconBtn}>
-                <Ionicons name="log-out-outline" size={20} color="#fff" />
-              </Pressable>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  testID="open-chat-button"
+                  onPress={() => router.push("/chat")}
+                  style={styles.iconBtn}
+                >
+                  <Ionicons name="chatbubbles-outline" size={20} color="#fff" />
+                </Pressable>
+                <Pressable testID="logout-button" onPress={logout} style={styles.iconBtn}>
+                  <Ionicons name="log-out-outline" size={20} color="#fff" />
+                </Pressable>
+              </View>
             </View>
 
             <View style={styles.readinessCard} testID="audit-readiness-card">

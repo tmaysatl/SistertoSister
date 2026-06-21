@@ -139,6 +139,7 @@ class UserPublic(BaseModel):
     name: str
     role: Literal["admin", "caregiver"]
     created_at: str
+    photo_base64: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -165,6 +166,7 @@ class Client(BaseModel):
     address: Optional[str] = ""
     phone: Optional[str] = ""
     notes: Optional[str] = ""
+    photo_base64: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -173,6 +175,7 @@ class ClientCreate(BaseModel):
     address: Optional[str] = ""
     phone: Optional[str] = ""
     notes: Optional[str] = ""
+    photo_base64: Optional[str] = None
 
 
 DocCategory = Literal[
@@ -447,10 +450,251 @@ async def toggle_client_task(task_id: str,
     return ClientTask(**d)
 
 
+# ---------- PHOTO UPLOAD ----------
+class PhotoPayload(BaseModel):
+    photo_base64: str
+
+
+@api.put("/users/{user_id}/photo")
+async def set_user_photo(user_id: str, p: PhotoPayload,
+                         current: UserPublic = Depends(get_current_user)):
+    if current.role != "admin" and current.id != user_id:
+        raise HTTPException(403, "Not allowed")
+    b = p.photo_base64.split(",", 1)[-1]
+    await db.users.update_one({"id": user_id}, {"$set": {"photo_base64": b}})
+    return {"ok": True}
+
+
+@api.put("/clients/{client_id}/photo")
+async def set_client_photo(client_id: str, p: PhotoPayload,
+                           _: UserPublic = Depends(require_admin)):
+    b = p.photo_base64.split(",", 1)[-1]
+    await db.clients.update_one({"id": client_id}, {"$set": {"photo_base64": b}})
+    return {"ok": True}
+
+
+# ---------- SHIFTS (schedule + clock-in/out) ----------
+class Shift(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    caregiver_id: str
+    client_id: str
+    kind: Literal["recurring", "one_off"] = "one_off"
+    # for one_off
+    date: Optional[str] = None  # YYYY-MM-DD
+    # for recurring
+    weekdays: Optional[List[str]] = None  # e.g. ["MON","WED","FRI"]
+    start_time: str  # HH:MM
+    end_time: str    # HH:MM
+    notes: Optional[str] = ""
+    clocked_in_at: Optional[str] = None
+    clocked_out_at: Optional[str] = None
+    clock_location: Optional[str] = None
+    created_at: str = Field(default_factory=now_iso)
+
+
+class ShiftCreate(BaseModel):
+    caregiver_id: str
+    client_id: str
+    kind: Literal["recurring", "one_off"] = "one_off"
+    date: Optional[str] = None
+    weekdays: Optional[List[str]] = None
+    start_time: str
+    end_time: str
+    notes: Optional[str] = ""
+
+
+@api.post("/shifts", response_model=Shift)
+async def create_shift(req: ShiftCreate, _: UserPublic = Depends(require_admin)):
+    obj = Shift(**req.dict())
+    await db.shifts.insert_one(obj.dict())
+    return obj
+
+
+@api.get("/shifts", response_model=List[Shift])
+async def list_shifts(
+    client_id: Optional[str] = None,
+    caregiver_id: Optional[str] = None,
+    current: UserPublic = Depends(get_current_user),
+):
+    q = {}
+    if client_id:
+        q["client_id"] = client_id
+    if caregiver_id:
+        q["caregiver_id"] = caregiver_id
+    if current.role == "caregiver":
+        q["caregiver_id"] = current.id
+    docs = await db.shifts.find(q, {"_id": 0}).sort("date", 1).to_list(500)
+    return [Shift(**d) for d in docs]
+
+
+@api.delete("/shifts/{shift_id}")
+async def delete_shift(shift_id: str, _: UserPublic = Depends(require_admin)):
+    await db.shifts.delete_one({"id": shift_id})
+    return {"ok": True}
+
+
+class ClockReq(BaseModel):
+    location: Optional[str] = None
+
+
+@api.post("/shifts/{shift_id}/clock-in", response_model=Shift)
+async def clock_in(shift_id: str, req: ClockReq,
+                   current: UserPublic = Depends(get_current_user)):
+    d = await db.shifts.find_one({"id": shift_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Shift not found")
+    if current.role == "caregiver" and d["caregiver_id"] != current.id:
+        raise HTTPException(403, "Not your shift")
+    update = {"clocked_in_at": now_iso(), "clock_location": req.location}
+    await db.shifts.update_one({"id": shift_id}, {"$set": update})
+    d.update(update)
+    return Shift(**d)
+
+
+@api.post("/shifts/{shift_id}/clock-out", response_model=Shift)
+async def clock_out(shift_id: str, req: ClockReq,
+                    current: UserPublic = Depends(get_current_user)):
+    d = await db.shifts.find_one({"id": shift_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Shift not found")
+    if current.role == "caregiver" and d["caregiver_id"] != current.id:
+        raise HTTPException(403, "Not your shift")
+    update = {"clocked_out_at": now_iso()}
+    await db.shifts.update_one({"id": shift_id}, {"$set": update})
+    d.update(update)
+    return Shift(**d)
+
+
+# ---------- CLIENT DETAIL (drill-in) ----------
+@api.get("/clients/{client_id}/detail")
+async def client_detail(client_id: str,
+                        _: UserPublic = Depends(get_current_user)):
+    cl = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not cl:
+        raise HTTPException(404, "Client not found")
+    tasks = await db.client_tasks.find(
+        {"client_id": client_id}, {"_id": 0}
+    ).sort("seq", 1).to_list(200)
+    assignments = await db.assignments.find(
+        {"client_id": client_id}, {"_id": 0}
+    ).to_list(50)
+    cg_ids = [a["caregiver_id"] for a in assignments]
+    caregivers = []
+    if cg_ids:
+        async for u in db.users.find(
+            {"id": {"$in": cg_ids}}, {"_id": 0, "hashed_password": 0}
+        ):
+            caregivers.append(u)
+    shifts = await db.shifts.find(
+        {"client_id": client_id}, {"_id": 0}
+    ).sort("date", -1).to_list(100)
+    return {
+        "client": cl,
+        "tasks": tasks,
+        "assignments": assignments,
+        "caregivers": caregivers,
+        "shifts": shifts,
+    }
+
+
+# ---------- IN-APP CHAT (1:1 direct messages) ----------
+class ChatSendReq(BaseModel):
+    to_user_id: str
+    text: str
+
+
+@api.post("/chat/messages")
+async def send_message(req: ChatSendReq,
+                       current: UserPublic = Depends(get_current_user)):
+    if not req.text.strip():
+        raise HTTPException(400, "Empty message")
+    recipient = await db.users.find_one({"id": req.to_user_id}, {"_id": 0})
+    if not recipient:
+        raise HTTPException(404, "Recipient not found")
+    msg = {
+        "id": str(uuid.uuid4()),
+        "from_id": current.id,
+        "from_name": current.name,
+        "to_id": req.to_user_id,
+        "to_name": recipient["name"],
+        "text": req.text.strip(),
+        "created_at": now_iso(),
+        "read": False,
+    }
+    await db.chat_dms.insert_one(msg)
+    return {k: v for k, v in msg.items() if k != "_id"}
+
+
+@api.get("/chat/threads")
+async def list_threads(current: UserPublic = Depends(get_current_user)):
+    """Return list of conversations with most recent message + unread count."""
+    pipeline = [
+        {"$match": {"$or": [{"from_id": current.id}, {"to_id": current.id}]}},
+        {"$sort": {"created_at": -1}},
+    ]
+    threads: dict = {}
+    async for m in db.chat_dms.aggregate(pipeline):
+        other = m["to_id"] if m["from_id"] == current.id else m["from_id"]
+        other_name = m["to_name"] if m["from_id"] == current.id else m["from_name"]
+        if other not in threads:
+            threads[other] = {
+                "other_id": other, "other_name": other_name,
+                "last_message": m["text"], "last_at": m["created_at"],
+                "unread": 0,
+            }
+        if m["to_id"] == current.id and not m.get("read"):
+            threads[other]["unread"] += 1
+    # Look up other_user photo for nicer UI
+    ids = list(threads.keys())
+    if ids:
+        async for u in db.users.find(
+            {"id": {"$in": ids}}, {"_id": 0, "id": 1, "photo_base64": 1, "role": 1}
+        ):
+            if u["id"] in threads:
+                threads[u["id"]]["photo_base64"] = u.get("photo_base64")
+                threads[u["id"]]["role"] = u.get("role")
+    return list(threads.values())
+
+
+@api.get("/chat/messages")
+async def get_messages(with_user: str = Query(..., alias="with"),
+                       current: UserPublic = Depends(get_current_user)):
+    q = {"$or": [
+        {"from_id": current.id, "to_id": with_user},
+        {"from_id": with_user, "to_id": current.id},
+    ]}
+    msgs = await db.chat_dms.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
+    # Mark inbound as read
+    await db.chat_dms.update_many(
+        {"to_id": current.id, "from_id": with_user, "read": False},
+        {"$set": {"read": True}},
+    )
+    return msgs
+
+
+@api.get("/chat/contacts")
+async def list_contacts(current: UserPublic = Depends(get_current_user)):
+    """For admin: list all caregivers. For caregiver: list all admins."""
+    target_role = "caregiver" if current.role == "admin" else "admin"
+    docs = await db.users.find(
+        {"role": target_role}, {"_id": 0, "hashed_password": 0}
+    ).to_list(500)
+    return docs
+
+
 # ---------- AUDIT BINDER PDF ----------
 @api.get("/reports/audit-binder")
-async def audit_binder(_: UserPublic = Depends(require_admin)):
-    """Generate single PDF binder of all docs + audit trail (surveyor-ready)."""
+async def audit_binder(
+    client_id: Optional[str] = None,
+    caregiver_id: Optional[str] = None,
+    _: UserPublic = Depends(require_admin),
+):
+    """Generate single PDF binder of all docs + audit trail (surveyor-ready).
+
+    Optional filters:
+    - client_id: include only client_onboarding + that client's signed copies
+    - caregiver_id: include only caregiver_onboarding + that caregiver's credentials
+    """
     from reportlab.lib.units import inch
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -521,6 +765,10 @@ async def audit_binder(_: UserPublic = Depends(require_admin)):
         ("Caregiver Credentials", "credential"),
         ("Training Materials", "training"),
     ]
+    if client_id:
+        sections = [s for s in sections if s[1] in ("client_onboarding", "policy")]
+    elif caregiver_id:
+        sections = [s for s in sections if s[1] in ("caregiver_onboarding", "credential", "policy", "training")]
     for label, cat in sections:
         docs = await db.documents.find(
             {"category": cat}, {"_id": 0, "file_base64": 0}

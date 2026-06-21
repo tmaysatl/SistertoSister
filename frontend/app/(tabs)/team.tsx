@@ -150,7 +150,11 @@ export default function Team() {
           refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}
           ListEmptyComponent={!loading ? <Empty text="No clients yet" /> : null}
           renderItem={({ item }) => (
-            <View style={styles.row} testID={`client-${item.id}`}>
+            <Pressable
+              testID={`client-${item.id}`}
+              onPress={() => router.push(`/client/${item.id}`)}
+              style={styles.row}
+            >
               <View style={[styles.rowIcon, { backgroundColor: theme.colors.brandTertiary }]}>
                 <Ionicons name="person-outline" size={18} color={theme.colors.brandPrimary} />
               </View>
@@ -161,7 +165,8 @@ export default function Team() {
               {isAdmin && (
                 <Pressable
                   testID={`bulk-assign-client-${item.id}`}
-                  onPress={async () => {
+                  onPress={async (e) => {
+                    e.stopPropagation();
                     await apiPost(`/clients/${item.id}/bulk-assign-onboarding`, {});
                     load();
                   }}
@@ -174,13 +179,13 @@ export default function Team() {
               {isAdmin && (
                 <Pressable
                   testID={`delete-client-${item.id}`}
-                  onPress={() => apiDelete(`/clients/${item.id}`).then(load)}
+                  onPress={(e) => { e.stopPropagation(); apiDelete(`/clients/${item.id}`).then(load); }}
                   hitSlop={10}
                 >
                   <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
                 </Pressable>
               )}
-            </View>
+            </Pressable>
           )}
         />
       )}
