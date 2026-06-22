@@ -1,242 +1,178 @@
 import { useCallback, useState } from "react";
 import {
-  View, Text, StyleSheet, Pressable, TextInput, Modal,
-  ActivityIndicator, RefreshControl, KeyboardAvoidingView, Platform, FlatList,
+  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
+  RefreshControl,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import * as DocumentPicker from "expo-document-picker";
 import { useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { theme } from "@/src/theme";
 
-type DocItem = {
+type Policy = {
   id: string;
   title: string;
-  category: string;
   notes?: string;
   uploaded_at: string;
   seq?: number | null;
-  is_template?: boolean;
-  file_base64?: string | null;
+};
+
+type Ack = {
+  id: string;
+  policy_id: string;
+  policy_title: string;
+  user_id: string;
+  user_name: string;
+  acknowledged_at: string;
 };
 
 export default function Policies() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
-
-  const [docs, setDocs] = useState<DocItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [title, setTitle] = useState("");
-  const [notes, setNotes] = useState("");
-  const [picked, setPicked] = useState<{ base64: string; mime: string; name: string } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [seeding, setSeeding] = useState(false);
+  const [policies, setPolicies] = useState<Policy[]>([]);
+  const [acks, setAcks] = useState<Ack[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
-      const d = await apiGet<DocItem[]>("/documents?category=policy");
-      setDocs(d);
-    } catch (e) { console.log(e); }
-    finally { setLoading(false); }
+      const [p, a] = await Promise.all([
+        apiGet<Policy[]>("/documents?category=policy"),
+        apiGet<Ack[]>("/policies/acknowledgments"),
+      ]);
+      p.sort((x, y) => (x.seq ?? 999) - (y.seq ?? 999));
+      setPolicies(p);
+      setAcks(a);
+    } catch (e) { console.log("policies load", e); }
+    finally { setLoading(false); setRefreshing(false); }
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const pickFile = async () => {
-    const res = await DocumentPicker.getDocumentAsync({ base64: true });
-    if (res.canceled || !res.assets?.length) return;
-    const a = res.assets[0];
-    let base64 = a.base64;
-    if (!base64 && a.uri) {
-      try {
-        const r = await fetch(a.uri); const b = await r.blob();
-        base64 = await new Promise<string>((resolve, reject) => {
-          const fr = new FileReader();
-          fr.onloadend = () => resolve(((fr.result as string) || "").split(",")[1] || "");
-          fr.onerror = reject;
-          fr.readAsDataURL(b);
-        });
-      } catch { /* ignore */ }
-    }
-    if (!base64) return;
-    setPicked({ base64, mime: a.mimeType || "application/pdf", name: a.name });
+  const myAckFor = (pid: string) =>
+    acks.find((a) => a.policy_id === pid && a.user_id === user?.id);
+
+  const toggle = async (pol: Policy) => {
+    setBusyId(pol.id);
+    try {
+      const existing = myAckFor(pol.id);
+      if (existing) {
+        await apiDelete(`/policies/acknowledge/${pol.id}`);
+      } else {
+        await apiPost(`/policies/acknowledge`, { policy_id: pol.id });
+      }
+      await load();
+    } catch (e) { console.log("ack err", e); }
+    finally { setBusyId(null); }
   };
 
-  const submit = async () => {
-    if (!title.trim()) return;
-    setSubmitting(true);
-    try {
-      await apiPost("/documents", {
-        title: title.trim(),
-        category: "policy",
-        notes,
-        owner_type: "agency",
-        file_base64: picked?.base64 || null,
-        mime_type: picked?.mime || "application/pdf",
-      });
-      setShowAdd(false);
-      setTitle(""); setNotes(""); setPicked(null);
-      load();
-    } finally { setSubmitting(false); }
-  };
+  const total = policies.length;
+  const acked = policies.filter((p) => myAckFor(p.id)).length;
+  const pct = total > 0 ? Math.round((acked / total) * 100) : 0;
 
-  const seed = async () => {
-    setSeeding(true);
-    try {
-      await apiPost("/documents/seed-templates", {});
-      load();
-    } finally { setSeeding(false); }
-  };
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <View style={styles.center}><ActivityIndicator color={theme.colors.brandPrimary} /></View>
+      </SafeAreaView>
+    );
+  }
 
   return (
-    <SafeAreaView edges={["top"]} style={styles.root}>
+    <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>Policies & Procedures</Text>
-          <Text style={styles.subtitle}>{docs.length} document{docs.length === 1 ? "" : "s"}</Text>
-        </View>
-        {isAdmin && (
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <Pressable
-              testID="policies-seed-button"
-              onPress={seed}
-              disabled={seeding}
-              style={styles.seedBtn}
-            >
-              {seeding ? (
-                <ActivityIndicator size="small" color={theme.colors.brandPrimary} />
-              ) : (
-                <>
-                  <Ionicons name="download-outline" size={16} color={theme.colors.brandPrimary} />
-                  <Text style={styles.seedBtnText}>Seed Stubs</Text>
-                </>
-              )}
-            </Pressable>
-            <Pressable
-              testID="add-policy-button"
-              onPress={() => setShowAdd(true)}
-              style={styles.addBtn}
-            >
-              <Ionicons name="add" size={22} color="#fff" />
-            </Pressable>
-          </View>
-        )}
+        <Text style={styles.title}>Policies</Text>
+        <Text style={styles.subtitle}>Review each policy and acknowledge that you have read and understood it.</Text>
       </View>
 
-      <FlatList
-        data={docs}
-        keyExtractor={(i) => i.id}
-        contentContainerStyle={{ padding: 20, gap: 10, paddingBottom: 40 }}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}
-        ListEmptyComponent={
-          loading ? null : (
-            <View style={styles.empty}>
-              <View style={styles.emptyIcon}>
-                <Ionicons name="shield-checkmark-outline" size={36} color={theme.colors.brandPrimary} />
-              </View>
-              <Text style={styles.emptyTitle}>No policies yet</Text>
-              <Text style={styles.emptySubtitle}>
-                {isAdmin
-                  ? 'Tap "Seed Stubs" to load standard P&P titles or "+" to upload your own.'
-                  : "Your admin hasn't published policies yet."}
-              </Text>
-            </View>
-          )
-        }
-        renderItem={({ item }) => (
-          <View style={styles.card} testID={`policy-${item.id}`}>
-            <View style={styles.cardIcon}>
-              <Ionicons name="shield-checkmark-outline" size={20} color={theme.colors.brandPrimary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>{item.title}</Text>
-              <Text style={styles.cardMeta}>
-                {item.file_base64 ? "PDF attached" : "Pending upload"} · {new Date(item.uploaded_at).toLocaleDateString()}
-              </Text>
-              {!!item.notes && <Text style={styles.cardNotes} numberOfLines={2}>{item.notes}</Text>}
-            </View>
-            {isAdmin && (
-              <Pressable
-                testID={`delete-policy-${item.id}`}
-                onPress={() => apiDelete(`/documents/${item.id}`).then(load)}
-                hitSlop={10}
-              >
-                <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
-              </Pressable>
-            )}
-          </View>
-        )}
-      />
+      <View style={styles.progressCard}>
+        <View style={styles.progressRow}>
+          <Text style={styles.progressTitle}>Your acknowledgments</Text>
+          <Text style={styles.progressCount}>{acked} / {total}</Text>
+        </View>
+        <View style={styles.progressBar}>
+          <View style={[styles.progressFill, { width: `${pct}%` }]} />
+        </View>
+      </View>
 
-      <Modal visible={showAdd} transparent animationType="slide" onRequestClose={() => setShowAdd(false)}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ flex: 1, justifyContent: "flex-end" }}
-        >
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowAdd(false)} />
-          <View style={styles.sheet}>
-            <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle}>New policy</Text>
-            <TextInput
-              testID="policy-title-input"
-              value={title} onChangeText={setTitle}
-              placeholder="Policy title (e.g. Bloodborne Pathogens)"
-              placeholderTextColor={theme.colors.muted}
-              style={styles.input}
-            />
-            <TextInput
-              value={notes} onChangeText={setNotes}
-              placeholder="Description / revision date"
-              placeholderTextColor={theme.colors.muted}
-              multiline
-              style={[styles.input, { minHeight: 80, textAlignVertical: "top" }]}
-            />
-            <Pressable testID="policy-pick-file" onPress={pickFile} style={styles.pickBtn}>
-              <Ionicons name="document-attach-outline" size={18} color={theme.colors.brandPrimary} />
-              <Text style={styles.pickBtnText}>{picked ? picked.name : "Attach PDF (optional)"}</Text>
-            </Pressable>
+      <ScrollView
+        contentContainerStyle={{ padding: 16, paddingBottom: 80, gap: 10 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={theme.colors.brandPrimary} />}
+      >
+        {policies.length === 0 && (
+          <Text style={styles.empty}>No policies seeded yet.</Text>
+        )}
+        {policies.map((p) => {
+          const a = myAckFor(p.id);
+          const acked = !!a;
+          return (
             <Pressable
-              testID="submit-policy-button"
-              onPress={submit}
-              disabled={submitting || !title.trim()}
-              style={[styles.primaryBtn, (!title.trim() || submitting) && { opacity: 0.5 }]}
+              key={p.id}
+              testID={`policy-ack-${p.id}`}
+              onPress={() => toggle(p)}
+              disabled={busyId === p.id}
+              style={[styles.card, acked && styles.cardOn]}
             >
-              {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Publish</Text>}
+              <View style={[styles.checkbox, acked && styles.checkboxOn]}>
+                {busyId === p.id ? (
+                  <ActivityIndicator color={acked ? "#fff" : theme.colors.brandPrimary} size="small" />
+                ) : acked ? (
+                  <Ionicons name="checkmark" size={18} color="#fff" />
+                ) : null}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardTitle}>{p.title}</Text>
+                {acked ? (
+                  <Text style={styles.cardSubOk}>
+                    Acknowledged {new Date(a!.acknowledged_at).toLocaleString()}
+                  </Text>
+                ) : (
+                  <Text style={styles.cardSub}>I have read and acknowledge this policy</Text>
+                )}
+              </View>
+              <Ionicons
+                name={acked ? "checkmark-circle" : "chevron-forward"}
+                size={20}
+                color={acked ? theme.colors.success : theme.colors.muted}
+              />
             </Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          );
+        })}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.surface },
-  header: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  title: { fontSize: 26, fontWeight: "700", color: theme.colors.onSurface },
-  subtitle: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
-  addBtn: { width: 40, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandPrimary, alignItems: "center", justifyContent: "center" },
-  seedBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 12, height: 40, borderRadius: 12, backgroundColor: theme.colors.brandTertiary, borderWidth: 1, borderColor: theme.colors.brandPrimary },
-  seedBtnText: { color: theme.colors.brandPrimary, fontWeight: "700", fontSize: 12 },
-  card: { flexDirection: "row", gap: 12, alignItems: "center", backgroundColor: theme.colors.surfaceSecondary, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: theme.colors.border },
-  cardIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: theme.colors.brandTertiary, alignItems: "center", justifyContent: "center" },
-  cardTitle: { fontSize: 15, fontWeight: "600", color: theme.colors.onSurface },
-  cardMeta: { fontSize: 11, color: theme.colors.muted, marginTop: 2, fontWeight: "600", letterSpacing: 0.4 },
-  cardNotes: { fontSize: 12, color: theme.colors.onSurfaceTertiary, marginTop: 4 },
-  empty: { alignItems: "center", paddingVertical: 80, gap: 8 },
-  emptyIcon: { width: 80, height: 80, borderRadius: 24, backgroundColor: theme.colors.brandTertiary, alignItems: "center", justifyContent: "center" },
-  emptyTitle: { fontSize: 16, fontWeight: "700", color: theme.colors.onSurface, marginTop: 8 },
-  emptySubtitle: { fontSize: 13, color: theme.colors.muted, textAlign: "center", paddingHorizontal: 40 },
-  sheet: { backgroundColor: theme.colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 32, gap: 12 },
-  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: theme.colors.border, alignSelf: "center" },
-  sheetTitle: { fontSize: 20, fontWeight: "700", color: theme.colors.onSurface },
-  input: { backgroundColor: theme.colors.surfaceSecondary, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: theme.colors.onSurface },
-  pickBtn: { flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderStyle: "dashed", borderColor: theme.colors.brandPrimary, backgroundColor: theme.colors.brandTertiary, padding: 14, borderRadius: 12 },
-  pickBtnText: { color: theme.colors.brandPrimary, fontWeight: "600", fontSize: 14, flex: 1 },
-  primaryBtn: { backgroundColor: theme.colors.brandPrimary, padding: 16, borderRadius: 12, alignItems: "center", marginTop: 6 },
-  primaryBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  safe: { flex: 1, backgroundColor: theme.colors.background },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  header: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 6, gap: 4 },
+  title: { fontSize: 26, fontWeight: "800", color: theme.colors.onSurface, letterSpacing: -0.4 },
+  subtitle: { fontSize: 12, color: theme.colors.muted },
+  progressCard: {
+    marginHorizontal: 16, marginTop: 4, padding: 14,
+    backgroundColor: theme.colors.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: theme.colors.border, gap: 10,
+  },
+  progressRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  progressTitle: { fontSize: 13, fontWeight: "700", color: theme.colors.onSurface },
+  progressCount: { fontSize: 13, fontWeight: "700", color: theme.colors.brandPrimary },
+  progressBar: { height: 6, borderRadius: 3, backgroundColor: theme.colors.surfaceSecondary, overflow: "hidden" },
+  progressFill: { height: "100%", backgroundColor: theme.colors.success },
+  empty: { textAlign: "center", color: theme.colors.muted, paddingVertical: 24 },
+  card: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    padding: 14, backgroundColor: theme.colors.surface,
+    borderRadius: 14, borderWidth: 1, borderColor: theme.colors.border,
+  },
+  cardOn: { backgroundColor: theme.colors.brandTertiary, borderColor: theme.colors.brandPrimary },
+  cardTitle: { fontSize: 14, fontWeight: "700", color: theme.colors.onSurface },
+  cardSub: { fontSize: 12, color: theme.colors.muted, marginTop: 2 },
+  cardSubOk: { fontSize: 12, color: theme.colors.success, marginTop: 2, fontWeight: "600" },
+  checkbox: {
+    width: 28, height: 28, borderRadius: 14, borderWidth: 2,
+    borderColor: theme.colors.borderStrong, alignItems: "center", justifyContent: "center",
+  },
+  checkboxOn: { backgroundColor: theme.colors.success, borderColor: theme.colors.success },
 });

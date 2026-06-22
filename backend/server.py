@@ -815,13 +815,15 @@ CAREGIVER_ONBOARDING_TEMPLATES = [
     "Form W-4 Tax Withholding",
     "Direct Deposit Authorization",
     "OIG / Background Check Authorization",
-    "TB Test / Health Clearance",
-    "Confidentiality & HIPAA Agreement",
+    "Caregiver Competency Checklist",
+    "HIPAA Confidentiality Agreement",
     "Code of Conduct Acknowledgment",
     "Job Description Acknowledgment",
     "Emergency Contact Form",
-    "Orientation Sign-Off",
-    "Caregiver Competency Checklist",
+    "Drug Screening Consent",
+    "Vehicle Driver Authorization",
+    "Policy Handbook Acknowledgment",
+    "Emergency Contact & Availability",
 ]
 
 CAREGIVER_CREDENTIAL_TEMPLATES = [
@@ -846,6 +848,128 @@ POLICY_TEMPLATES = [
     "Documentation Standards",
     "Caregiver Code of Ethics",
 ]
+
+
+from forms import all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS
+
+
+@api.post("/documents/rebuild-fillable")
+async def rebuild_fillable(current: UserPublic = Depends(require_admin)):
+    """Regenerate the canonical fillable AcroForm PDFs for the 5 client +
+    14 caregiver onboarding forms and replace the file_base64 in each
+    matching template document. Also dedupes any extra/duplicate template
+    rows so the lists are exactly 13 client + 14 caregiver."""
+    import base64 as _b64
+    updated = 0
+    deleted = 0
+
+    # 1) For each generated PDF: find template by category+title, set file_base64
+    for category, title, pdf_bytes, seq in all_fillable_pdfs():
+        b64 = _b64.b64encode(pdf_bytes).decode("ascii")
+        existing = await db.documents.find_one(
+            {"category": category, "title": title, "is_template": True}
+        )
+        if existing:
+            await db.documents.update_one(
+                {"id": existing["id"]},
+                {"$set": {
+                    "file_base64": b64,
+                    "mime_type": "application/pdf",
+                    "uploaded_at": now_iso(),
+                    "seq": seq,
+                }},
+            )
+        else:
+            doc = Document(
+                title=title, category=category,  # type: ignore
+                owner_type="agency", uploaded_by=current.id,
+                file_base64=b64, mime_type="application/pdf",
+                seq=seq, is_template=True,
+                notes="Fillable form \u2014 open and complete in any PDF viewer.",
+            )
+            await db.documents.insert_one(doc.dict())
+        updated += 1
+
+    # 2) Dedupe: keep only template rows whose titles match the canonical lists
+    canonical_client = set(CLIENT_ONBOARDING_TEMPLATES)
+    canonical_caregiver = set(CAREGIVER_ONBOARDING_TEMPLATES)
+    cur = db.documents.find(
+        {"category": {"$in": ["client_onboarding", "caregiver_onboarding"]},
+         "is_template": True}
+    )
+    seen: set = set()
+    async for d in cur:
+        # extract title stripped of seq prefix (e.g. "05 - Foo" -> "Foo")
+        raw = d.get("title", "")
+        stripped = raw.split(" - ", 1)[-1] if " - " in raw else raw
+        cat = d["category"]
+        canon = canonical_client if cat == "client_onboarding" else canonical_caregiver
+        key = (cat, stripped)
+        if stripped not in canon or key in seen:
+            await db.documents.delete_one({"id": d["id"]})
+            deleted += 1
+        else:
+            seen.add(key)
+
+    return {"updated": updated, "deleted_duplicates": deleted}
+
+
+# ---------- POLICY ACKNOWLEDGMENT ----------
+class PolicyAckReq(BaseModel):
+    policy_id: str
+
+
+@api.get("/policies/acknowledgments")
+async def list_acknowledgments(
+    user_id: Optional[str] = None,
+    current: UserPublic = Depends(get_current_user),
+):
+    """List policy acknowledgments. Caregivers see only their own.
+    Admins can pass `user_id` to view a specific caregiver's acks."""
+    q: dict = {}
+    if current.role == "caregiver":
+        q["user_id"] = current.id
+    elif user_id:
+        q["user_id"] = user_id
+    docs = await db.policy_acks.find(q, {"_id": 0}).to_list(500)
+    return docs
+
+
+@api.post("/policies/acknowledge")
+async def acknowledge_policy(
+    req: PolicyAckReq, current: UserPublic = Depends(get_current_user),
+):
+    """Caregiver (or admin self-acknowledge) confirms they've read a policy."""
+    # Verify the policy exists
+    pol = await db.documents.find_one(
+        {"id": req.policy_id, "category": "policy"}, {"_id": 0}
+    )
+    if not pol:
+        raise HTTPException(404, "Policy not found")
+    ack = {
+        "id": str(uuid.uuid4()),
+        "policy_id": req.policy_id,
+        "policy_title": pol.get("title"),
+        "user_id": current.id,
+        "user_name": current.name,
+        "acknowledged_at": now_iso(),
+    }
+    # Upsert: one ack per (policy_id, user_id)
+    await db.policy_acks.update_one(
+        {"policy_id": req.policy_id, "user_id": current.id},
+        {"$set": ack}, upsert=True,
+    )
+    return ack
+
+
+@api.delete("/policies/acknowledge/{policy_id}")
+async def un_acknowledge_policy(
+    policy_id: str, current: UserPublic = Depends(get_current_user),
+):
+    await db.policy_acks.delete_one(
+        {"policy_id": policy_id, "user_id": current.id}
+    )
+    return {"ok": True}
 
 
 @api.post("/documents/seed-templates")
