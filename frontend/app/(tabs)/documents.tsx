@@ -13,6 +13,7 @@ import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { MicrosoftIntegrationCard } from "@/src/components/MicrosoftIntegrationCard";
 import { ReplicationKitCard } from "@/src/components/ReplicationKitCard";
+import { FillableFormModal } from "@/src/components/FillableFormModal";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -67,7 +68,18 @@ export default function Documents() {
 
   // PDF viewer modal
   const [viewerDoc, setViewerDoc] = useState<DocItem | null>(null);
+  const [formDoc, setFormDoc] = useState<DocItem | null>(null);
   const [showBinder, setShowBinder] = useState(false);
+
+  // Detect fillable docs by title (matches backend SCHEMAS keys)
+  const FILLABLE_TITLES = new Set([
+    "05 - Client's Authorization Form",
+    "09 - Auto Release",
+    "01 - Employment Application",
+    "04 - Direct Deposit Authorization",
+    "10 - Emergency Contact Form",
+  ]);
+  const isFillable = (d: DocItem) => FILLABLE_TITLES.has(d.title);
 
   // Push-to-user modal
   const [pushDoc, setPushDoc] = useState<DocItem | null>(null);
@@ -310,7 +322,10 @@ export default function Documents() {
             expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
           const expired = expiry && expiry.getTime() < Date.now();
           const hasFile = !!item.file_base64;
-          const open = () => { if (hasFile) setViewerDoc(item); };
+          const open = () => {
+            if (isFillable(item)) { setFormDoc(item); return; }
+            if (hasFile) setViewerDoc(item);
+          };
           return (
             <Pressable
               onPress={hasFile ? open : undefined}
@@ -600,6 +615,15 @@ export default function Documents() {
         onClose={() => setShowBinder(false)}
         title="Sister to Sister — Audit Binder"
         path={showBinder ? "/reports/audit-binder" : null}
+      />
+
+      {/* Native fillable form (5 client + caregiver docs with schemas) */}
+      <FillableFormModal
+        visible={!!formDoc}
+        docId={formDoc?.id ?? null}
+        docTitle={formDoc?.title ?? ""}
+        onClose={() => setFormDoc(null)}
+        onSubmitted={() => { setFormDoc(null); load(); }}
       />
 
       {/* Push document to user(s) modal */}

@@ -851,6 +851,56 @@ POLICY_TEMPLATES = [
 
 
 from forms import all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS, build_policy_pdf, POLICY_BODIES
+from form_schemas import SCHEMAS as _FORM_SCHEMAS, has_schema as _has_schema, get_schema as _get_schema, render_filled_pdf as _render_filled
+
+
+@api.get("/documents/{doc_id}/form-schema")
+async def get_doc_form_schema(doc_id: str, current: UserPublic = Depends(get_current_user)):
+    d = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Document not found")
+    schema = _get_schema(d.get("title", ""))
+    if not schema:
+        return {"has_form": False}
+    return {"has_form": True, "title": d.get("title"), "schema": schema}
+
+
+class SubmitFormReq(BaseModel):
+    values: dict
+    signature_b64: Optional[str] = None
+    target_owner_id: Optional[str] = None       # admin can submit on behalf
+    target_owner_type: Optional[str] = "caregiver"
+
+
+@api.post("/documents/{doc_id}/submit-form")
+async def submit_doc_form(doc_id: str, req: SubmitFormReq,
+                          current: UserPublic = Depends(get_current_user)):
+    src = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not src:
+        raise HTTPException(404, "Document not found")
+    title = src.get("title", "")
+    if not _has_schema(title):
+        raise HTTPException(400, "This document has no fillable schema")
+
+    pdf_bytes = _render_filled(title, req.values, req.signature_b64, current.name)
+    new_doc = {
+        "id": str(uuid.uuid4()),
+        "title": f"COMPLETED - {title} - {current.name}",
+        "category": src.get("category"),
+        "owner_id": req.target_owner_id or current.id,
+        "owner_type": req.target_owner_type if current.role == "admin" else (
+            "caregiver" if current.role == "caregiver" else "agency"
+        ),
+        "file_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "mime_type": "application/pdf",
+        "uploaded_by": current.id,
+        "uploaded_at": now_iso(),
+        "is_template": False,
+        "notes": f"Filled from template: {title}",
+        "form_values": req.values,
+    }
+    await db.documents.insert_one(new_doc)
+    return {"id": new_doc["id"], "title": new_doc["title"]}
 
 
 @api.post("/documents/rebuild-fillable")
