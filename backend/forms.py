@@ -59,12 +59,14 @@ def _section(c: canvas.Canvas, text: str, y: float) -> float:
 
 def _label(c: canvas.Canvas, text: str, x: float, y: float,
            note: str = ""):
-    c.setFillColor(BRAND_PRIMARY)
-    c.setFont("Helvetica-Bold", 8.5)
+    # High-contrast near-black labels so they remain readable even when iOS
+    # Quick Look renders the PDF with a dark/gray backdrop.
+    c.setFillColor(colors.HexColor("#0E1A12"))
+    c.setFont("Helvetica-Bold", 9)
     c.drawString(x, y + 22, text)
     if note:
         c.setFillColor(TEXT_DIM)
-        c.setFont("Helvetica-Oblique", 7.2)
+        c.setFont("Helvetica-Oblique", 7.5)
         c.drawString(x, y + 12, note)
     c.setFillColor(BRAND_PRIMARY)
 
@@ -134,6 +136,10 @@ def _wrap(builder: Callable[[canvas.Canvas], None],
     c = canvas.Canvas(buf, pagesize=letter)
     c.setTitle(title)
     c.setAuthor("Sister to Sister, PHCP")
+    # Explicit WHITE page background so labels are readable even when the
+    # device PDF viewer applies a dark/gray backdrop (iOS Quick Look).
+    c.setFillColor(colors.white)
+    c.rect(0, 0, letter[0], letter[1], stroke=0, fill=1)
     builder(c)
     c.save()
     return buf.getvalue()
@@ -814,3 +820,135 @@ def all_fillable_pdfs() -> List[Tuple[str, str, bytes, int]]:
         seq = int(title[:2])
         out.append(("caregiver_onboarding", title, fn(), seq))
     return out
+
+
+# ============================================================
+# POLICY CONTENT PDFs (read-only body text per policy)
+# ============================================================
+POLICY_BODIES: Dict[str, List[str]] = {
+    "Code of Conduct": [
+        "All Sister to Sister, PHCP team members are expected to act with "
+        "honesty, integrity, and respect at all times.",
+        "Treat every client, family member, and coworker with dignity. "
+        "Discrimination, harassment, or retaliation will not be tolerated.",
+        "Maintain professional appearance and punctuality on every shift.",
+        "Do not accept gifts, tips, or money outside of approved compensation.",
+        "Report any conflict of interest, ethical concern, or boundary issue "
+        "to your supervisor in writing within 24 hours.",
+    ],
+    "HIPAA Privacy & Security": [
+        "Protected Health Information (PHI) includes anything that identifies "
+        "a client \u2014 name, DOB, address, diagnoses, medications, photos.",
+        "PHI must be accessed only as needed for assigned care duties. "
+        "Sharing PHI outside the care team (including with your own family) "
+        "is strictly prohibited.",
+        "Devices used for work must be password-protected. Never store client "
+        "PHI on personal devices, social media, or unsecured cloud storage.",
+        "Any suspected privacy breach must be reported to administration "
+        "immediately so we can notify affected clients within legal timeframes.",
+        "HIPAA violations can result in immediate termination and personal "
+        "civil/criminal liability.",
+    ],
+    "Bloodborne Pathogen Exposure Control": [
+        "Treat all blood and body fluids as potentially infectious.",
+        "Use personal protective equipment (gloves, mask, gown, eye protection) "
+        "for any task with potential exposure.",
+        "Wash hands with soap and water for at least 20 seconds before and "
+        "after every client interaction.",
+        "Clean and disinfect surfaces with EPA-approved disinfectant after any "
+        "contact with blood or body fluids.",
+        "Report any needle stick, splash, or exposure within 1 hour. Post-exposure "
+        "prophylaxis is most effective when started promptly.",
+    ],
+    "Abuse, Neglect & Exploitation Reporting": [
+        "All staff are mandated reporters in our state. If you suspect a client "
+        "is being abused, neglected, or financially exploited \u2014 by anyone, "
+        "including a family member \u2014 you must report it.",
+        "Report immediately to your supervisor AND to the state Adult Protective "
+        "Services hotline. Reporting in good faith is legally protected.",
+        "Document objective observations only (what you saw or heard). "
+        "Do not record opinions or accusations in the chart.",
+        "Failure to report is itself a reportable offense.",
+    ],
+    "Infection Control": [
+        "Hand hygiene is the single most effective infection prevention measure.",
+        "Use the agency-approved cleaning protocol after every shift.",
+        "Notify your supervisor before reporting to work if you have fever, "
+        "cough, gastrointestinal symptoms, or open skin lesions.",
+        "Annual flu vaccination is required. Other vaccines (TB, COVID) may be "
+        "required based on the client's care plan.",
+    ],
+    "Emergency Preparedness": [
+        "Familiarize yourself with each client's emergency plan on day one.",
+        "Know the location of fire extinguishers, exits, and emergency contact "
+        "list in every client's home.",
+        "For medical emergencies, call 911 first, then notify the office.",
+        "For weather emergencies, follow the agency's continuity-of-care plan.",
+    ],
+    "Confidentiality": [
+        "Do not discuss any client outside the care team \u2014 not with friends, "
+        "family, coworkers off shift, or on social media.",
+        "Photographs of clients or their homes are not permitted without explicit "
+        "written authorization.",
+        "Confidentiality obligations continue indefinitely after your employment ends.",
+    ],
+    "Drug-Free Workplace": [
+        "Sister to Sister, PHCP maintains a drug- and alcohol-free workplace.",
+        "Caregivers may not consume alcohol or controlled substances within 8 hours "
+        "of any shift.",
+        "Pre-employment, random, post-incident, and reasonable-suspicion drug "
+        "screens may be performed at any time.",
+        "Prescription medications that may impair judgment must be disclosed to "
+        "the office prior to the start of a shift.",
+    ],
+    "Equal Employment Opportunity": [
+        "Sister to Sister, PHCP is an equal-opportunity employer.",
+        "We do not discriminate in hiring, training, promotion, or termination "
+        "based on race, color, religion, sex, sexual orientation, gender identity, "
+        "national origin, age, disability, veteran status, or any other protected "
+        "characteristic.",
+        "Concerns regarding discrimination or harassment should be reported to "
+        "the administrator promptly.",
+    ],
+    "Workplace Safety": [
+        "Use proper body mechanics for lifts and transfers. When in doubt, ask "
+        "for a second person.",
+        "Report any unsafe condition in a client's home (loose rugs, broken steps, "
+        "aggressive pets, unsafe weapons) to your supervisor immediately.",
+        "Workers compensation paperwork must be initiated within 24 hours of any "
+        "on-the-job injury.",
+    ],
+}
+
+
+def build_policy_pdf(title: str) -> bytes:
+    """Build a one-page read-only policy PDF with branded chrome + body text."""
+    # Strip "01 - " prefix when matching against POLICY_BODIES
+    stripped = title.split(" - ", 1)[-1] if " - " in title else title
+    paragraphs = POLICY_BODIES.get(stripped) or [
+        "This policy is part of the Sister to Sister, PHCP compliance manual.",
+        "Please contact administration for the full text of this policy.",
+    ]
+
+    def build(c: canvas.Canvas):
+        from reportlab.lib.utils import simpleSplit
+        y = _draw_chrome(c, stripped, "Read and acknowledge in the app.")
+        c.setFillColor(colors.HexColor("#1d2421"))
+        c.setFont("Helvetica", 11)
+        for para in paragraphs:
+            wrapped = simpleSplit(para, "Helvetica", 11, letter[0] - 1.2 * inch)
+            for line in wrapped:
+                c.drawString(0.6 * inch, y, line)
+                y -= 16
+            y -= 10
+            if y < 1.2 * inch:
+                break
+        # Footer
+        c.setFillColor(TEXT_DIM)
+        c.setFont("Helvetica-Oblique", 8)
+        c.drawString(0.6 * inch, 0.7 * inch,
+                     "Acknowledgment is recorded electronically in the "
+                     "Sister to Sister, PHCP compliance app.")
+        _footer(c, 1)
+
+    return _wrap(build, stripped)

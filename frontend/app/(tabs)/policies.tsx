@@ -8,6 +8,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet, apiPost, apiDelete } from "@/src/api/client";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme } from "@/src/theme";
 
 type Policy = {
@@ -34,6 +35,7 @@ export default function Policies() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<Policy | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -128,18 +130,29 @@ export default function Policies() {
                     Acknowledged {new Date(a!.acknowledged_at).toLocaleString()}
                   </Text>
                 ) : (
-                  <Text style={styles.cardSub}>I have read and acknowledge this policy</Text>
+                  <Text style={styles.cardSub}>Tap Read to view, then check to acknowledge.</Text>
                 )}
               </View>
-              <Ionicons
-                name={acked ? "checkmark-circle" : "chevron-forward"}
-                size={20}
-                color={acked ? theme.colors.success : theme.colors.muted}
-              />
+              <Pressable
+                testID={`policy-read-${p.id}`}
+                onPress={(e) => { e.stopPropagation(); setViewing(p); }}
+                hitSlop={8}
+                style={styles.readBtn}
+              >
+                <Ionicons name="document-text-outline" size={16} color={theme.colors.brandPrimary} />
+                <Text style={styles.readBtnText}>Read</Text>
+              </Pressable>
             </Pressable>
           );
         })}
       </ScrollView>
+
+      <PdfViewerModal
+        visible={!!viewing}
+        onClose={() => setViewing(null)}
+        title={viewing?.title || ""}
+        path={viewing ? `/documents/${viewing.id}/stamped` : null}
+      />
     </SafeAreaView>
   );
 }
@@ -175,4 +188,11 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.borderStrong, alignItems: "center", justifyContent: "center",
   },
   checkboxOn: { backgroundColor: theme.colors.success, borderColor: theme.colors.success },
+  readBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 999,
+    backgroundColor: theme.colors.brandTertiary,
+    borderWidth: 1, borderColor: theme.colors.brandPrimary,
+  },
+  readBtnText: { fontSize: 12, fontWeight: "700", color: theme.colors.brandPrimary },
 });

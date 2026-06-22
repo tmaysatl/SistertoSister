@@ -850,7 +850,7 @@ POLICY_TEMPLATES = [
 ]
 
 
-from forms import all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS
+from forms import all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS, build_policy_pdf, POLICY_BODIES
 
 
 @api.post("/documents/rebuild-fillable")
