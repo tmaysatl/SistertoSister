@@ -1020,13 +1020,9 @@ async def list_acknowledgments(
 ):
     """List policy acknowledgments. Caregivers see only their own.
     Admins can pass `user_id` to view a specific caregiver's acks."""
-    q: dict = {}
-    if current.role == "caregiver":
-        q["user_id"] = current.id
-    elif user_id:
-        q["user_id"] = user_id
-    docs = await db.policy_acks.find(q, {"_id": 0}).to_list(500)
-    return docs
+    # Slice H: read from Postgres
+    target = current.id if current.role == "caregiver" else user_id
+    return await supa_data.list_policy_acks(user_id=target)
 
 
 @api.post("/policies/acknowledge")
@@ -1053,6 +1049,8 @@ async def acknowledge_policy(
         {"policy_id": req.policy_id, "user_id": current.id},
         {"$set": ack}, upsert=True,
     )
+    # Slice H: mirror upsert to Postgres
+    await supa_data.upsert_policy_ack(ack)
     return ack
 
 
@@ -1063,6 +1061,8 @@ async def un_acknowledge_policy(
     await db.policy_acks.delete_one(
         {"policy_id": policy_id, "user_id": current.id}
     )
+    # Slice H: mirror delete to Postgres
+    await supa_data.delete_policy_ack(policy_id, current.id)
     return {"ok": True}
 
 
@@ -1166,19 +1166,32 @@ async def delete_assignment(aid: str, _: UserPublic = Depends(require_admin)):
 async def create_training(req: TrainingCreate, _: UserPublic = Depends(require_admin)):
     obj = TrainingItem(**req.dict())
     await db.training.insert_one(obj.dict())
+    # Slice H: dual-write to Postgres. If a file is attached, upload to Storage
+    # using the same documents bucket (training id namespace).
+    t_dict = obj.dict()
+    fb = t_dict.pop("file_base64", None)
+    if fb:
+        path = supa_data.upload_document_blob_sync(
+            obj.id, fb, obj.mime_type or "video/mp4"
+        )
+        t_dict["storage_path"] = path
+    await supa_data.upsert_training(t_dict)
     return obj
 
 
 @api.get("/training", response_model=List[TrainingItem])
 async def list_training(_: UserPublic = Depends(get_current_user)):
-    docs = await db.training.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return [TrainingItem(**d) for d in docs]
+    # Slice H: read from Postgres
+    rows = await supa_data.list_training_all()
+    return [TrainingItem(**r) for r in rows]
 
 
 @api.delete("/training/{tid}")
 async def delete_training(tid: str, _: UserPublic = Depends(require_admin)):
     await db.training.delete_one({"id": tid})
     await db.training_completions.delete_many({"training_id": tid})
+    # Slice H: ON DELETE CASCADE handles completions in Postgres
+    await supa_data.delete_training(tid)
     return {"ok": True}
 
 
@@ -1189,9 +1202,13 @@ async def complete_training(tid: str, current: UserPublic = Depends(get_current_
     )
     if existing:
         existing.pop("_id", None)
+        # Heal any drift to Postgres
+        await supa_data.upsert_training_completion(existing)
         return TrainingCompletion(**existing)
     obj = TrainingCompletion(training_id=tid, caregiver_id=current.id)
     await db.training_completions.insert_one(obj.dict())
+    # Slice H: dual-write
+    await supa_data.upsert_training_completion(obj.dict())
     return obj
 
 
@@ -1200,13 +1217,10 @@ async def list_completions(
     caregiver_id: Optional[str] = None,
     current: UserPublic = Depends(get_current_user),
 ):
-    q = {}
-    if current.role == "caregiver":
-        q["caregiver_id"] = current.id
-    elif caregiver_id:
-        q["caregiver_id"] = caregiver_id
-    docs = await db.training_completions.find(q, {"_id": 0}).to_list(500)
-    return [TrainingCompletion(**d) for d in docs]
+    # Slice H: read from Postgres
+    cg = current.id if current.role == "caregiver" else caregiver_id
+    rows = await supa_data.list_training_completions(caregiver_id=cg)
+    return [TrainingCompletion(**r) for r in rows]
 
 
 # ---------- ONBOARDING ----------

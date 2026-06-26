@@ -958,3 +958,135 @@ async def count_packet_docs(category: str) -> int:
             category,
         )
     return int(n or 0)
+
+
+# ---------------------------------------------------------------------------
+# Policy acknowledgments + Training (Slice H)
+# ---------------------------------------------------------------------------
+
+async def upsert_policy_ack(a: dict) -> bool:
+    """One ack per (policy_id, user_id) — UPSERT on the unique constraint."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.policy_acks(id, user_id, user_name, policy_id,
+                                              policy_title, acknowledged_at)
+               values($1::uuid, $2::uuid, $3, $4, $5, coalesce($6, now()))
+               on conflict (policy_id, user_id) do update set
+                  user_name = excluded.user_name,
+                  policy_title = excluded.policy_title,
+                  acknowledged_at = excluded.acknowledged_at""",
+            a['id'], a['user_id'], a.get('user_name'),
+            a['policy_id'], a.get('policy_title') or '',
+            _ts(a.get('acknowledged_at')),
+        ), f"upsert_policy_ack {a.get('policy_id')}")
+
+
+async def delete_policy_ack(policy_id: str, user_id: str) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "delete from public.policy_acks where policy_id=$1 and user_id=$2::uuid",
+            policy_id, user_id,
+        ), f"delete_policy_ack {policy_id}/{user_id[:8]}")
+
+
+async def list_policy_acks(user_id: Optional[str] = None) -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        if user_id:
+            rows = await conn.fetch(
+                """select id::text, user_id::text, user_name, policy_id, policy_title,
+                          to_char(acknowledged_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as acknowledged_at
+                   from public.policy_acks where user_id=$1::uuid
+                   order by acknowledged_at desc""",
+                user_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """select id::text, user_id::text, user_name, policy_id, policy_title,
+                          to_char(acknowledged_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as acknowledged_at
+                   from public.policy_acks
+                   order by acknowledged_at desc"""
+            )
+    return [dict(r) for r in rows]
+
+
+# --- Training ---
+
+async def upsert_training(t: dict) -> bool:
+    """Training table has no file_base64 column; Mongo's file_base64 is uploaded
+    separately to Supabase Storage by the caller (similar to documents)."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.training(id, title, description, storage_path,
+                                            mime_type, required, created_at)
+               values($1::uuid, $2, $3, $4, $5, $6, coalesce($7, now()))
+               on conflict (id) do update set title=excluded.title,
+                                              description=excluded.description,
+                                              storage_path=excluded.storage_path,
+                                              mime_type=excluded.mime_type,
+                                              required=excluded.required""",
+            t['id'], t.get('title') or '', t.get('description') or '',
+            t.get('storage_path'),
+            t.get('mime_type') or 'video/mp4',
+            bool(t.get('required', True)),
+            _ts(t.get('created_at')),
+        ), f"upsert_training {t.get('id')}")
+
+
+async def delete_training(training_id: str) -> bool:
+    """Delete training; ON DELETE CASCADE clears completions."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "delete from public.training where id=$1::uuid",
+            training_id,
+        ), f"delete_training {training_id}")
+
+
+async def list_training_all() -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """select id::text, title, coalesce(description,'') as description,
+                      storage_path, mime_type, required,
+                      to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at
+               from public.training
+               order by created_at desc"""
+        )
+    return [dict(r) for r in rows]
+
+
+async def upsert_training_completion(c: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.training_completions(id, training_id, caregiver_id, completed_at)
+               values($1::uuid, $2::uuid, $3::uuid, coalesce($4, now()))
+               on conflict (training_id, caregiver_id) do nothing""",
+            c['id'], c['training_id'], c['caregiver_id'],
+            _ts(c.get('completed_at')),
+        ), f"upsert_training_completion {c.get('training_id')}")
+
+
+async def list_training_completions(caregiver_id: Optional[str] = None) -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        if caregiver_id:
+            rows = await conn.fetch(
+                """select id::text, training_id::text, caregiver_id::text,
+                          to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as completed_at
+                   from public.training_completions where caregiver_id=$1::uuid
+                   order by completed_at desc""",
+                caregiver_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """select id::text, training_id::text, caregiver_id::text,
+                          to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as completed_at
+                   from public.training_completions
+                   order by completed_at desc"""
+            )
+    return [dict(r) for r in rows]
