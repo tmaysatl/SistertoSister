@@ -102,6 +102,8 @@ async def list_caregivers(_: UserPublic = Depends(get_current_user)):
 async def create_client(req: ClientCreate, _: UserPublic = Depends(require_admin)):
     obj = Client(**req.dict())
     await db.clients.insert_one(obj.dict())
+    # Dual-write: also upsert into Supabase Postgres (best-effort).
+    await supa_data.upsert_client(obj.dict())
     return obj
 
 
@@ -126,6 +128,8 @@ async def delete_client(client_id: str, _: UserPublic = Depends(require_admin)):
     await db.clients.delete_one({"id": client_id})
     await db.assignments.delete_many({"client_id": client_id})
     await db.client_tasks.delete_many({"client_id": client_id})
+    # Dual-write: cascade is automatic in Postgres via ON DELETE CASCADE.
+    await supa_data.delete_client(client_id)
     return {"ok": True}
 
 
@@ -157,6 +161,7 @@ async def bulk_assign_client(client_id: str,
             seq=d.get("seq"),
         )
         await db.client_tasks.insert_one(task.dict())
+        await supa_data.upsert_client_task(task.dict())
         created += 1
     return {"created": created, "total_tasks": len(docs)}
 
@@ -177,11 +182,10 @@ async def toggle_client_task(task_id: str,
     if not d:
         raise HTTPException(404, "Task not found")
     new_completed = not d.get("completed", False)
-    update = {
-        "completed": new_completed,
-        "completed_at": now_iso() if new_completed else None,
-    }
+    completed_at = now_iso() if new_completed else None
+    update = {"completed": new_completed, "completed_at": completed_at}
     await db.client_tasks.update_one({"id": task_id}, {"$set": update})
+    await supa_data.toggle_client_task(task_id, new_completed, completed_at)
     d.update(update)
     return ClientTask(**d)
 
@@ -198,6 +202,7 @@ async def set_user_photo(user_id: str, p: PhotoPayload,
         raise HTTPException(403, "Not allowed")
     b = p.photo_base64.split(",", 1)[-1]
     await db.users.update_one({"id": user_id}, {"$set": {"photo_base64": b}})
+    await supa_data.update_user_photo(user_id, b)
     return {"ok": True}
 
 
@@ -206,6 +211,7 @@ async def set_client_photo(client_id: str, p: PhotoPayload,
                            _: UserPublic = Depends(require_admin)):
     b = p.photo_base64.split(",", 1)[-1]
     await db.clients.update_one({"id": client_id}, {"$set": {"photo_base64": b}})
+    await supa_data.update_client_photo(client_id, b)
     return {"ok": True}
 
 
@@ -1096,24 +1102,27 @@ async def create_assignment(req: AssignmentCreate,
         {"caregiver_id": req.caregiver_id, "client_id": req.client_id}, {"_id": 0}
     )
     if existing:
+        # Ensure Postgres also has it (heal any drift)
+        await supa_data.upsert_assignment(existing)
         return Assignment(**existing)
     obj = Assignment(**req.dict())
     await db.assignments.insert_one(obj.dict())
+    await supa_data.upsert_assignment(obj.dict())
     return obj
 
 
 @api.get("/assignments", response_model=List[Assignment])
 async def list_assignments(current: UserPublic = Depends(get_current_user)):
-    q = {}
-    if current.role == "caregiver":
-        q["caregiver_id"] = current.id
-    docs = await db.assignments.find(q, {"_id": 0}).to_list(500)
-    return [Assignment(**d) for d in docs]
+    # Phase 4: source from Supabase Postgres
+    cg = current.id if current.role == "caregiver" else None
+    rows = await supa_data.list_assignments(caregiver_id=cg)
+    return [Assignment(**r) for r in rows]
 
 
 @api.delete("/assignments/{aid}")
 async def delete_assignment(aid: str, _: UserPublic = Depends(require_admin)):
     await db.assignments.delete_one({"id": aid})
+    await supa_data.delete_assignment(aid)
     return {"ok": True}
 
 
