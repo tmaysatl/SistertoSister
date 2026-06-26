@@ -10,6 +10,7 @@ import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas
 import { useRef } from "react";
 import { API_BASE } from "@/src/api/client";
 import { theme, BRAND_NAME, LOGO_URL } from "@/src/theme";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 
 type Doc = { id: string; title: string; seq: number; is_template: boolean };
 type Packet = {
