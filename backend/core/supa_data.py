@@ -140,9 +140,22 @@ async def get_dashboard_counts() -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 async def _safe(coro, op: str) -> bool:
+    """Best-effort wrapper for Postgres writes.
+
+    Catches *operational* errors (network / FK / constraint hiccups) so a
+    Postgres outage doesn't block requests that already succeeded against
+    MongoDB. Programmer errors (SQL syntax, type mismatch, etc.) bubble up
+    so they get caught in development.
+    """
     try:
         await coro
         return True
+    except (asyncpg.PostgresSyntaxError,
+            asyncpg.UndefinedColumnError,
+            asyncpg.UndefinedTableError,
+            asyncpg.DataError):
+        # programmer bugs — re-raise so they're not silently hidden
+        raise
     except Exception as e:
         log.warning("[supa-write] %s failed: %s", op, str(e)[:200])
         return False
