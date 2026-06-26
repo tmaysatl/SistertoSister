@@ -160,7 +160,7 @@ export function FillableFormModal({ visible, docId, docTitle, onClose, onSubmitt
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen">
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.root}>
         <View style={styles.header}>
           <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={24} color="#fff" /></Pressable>
@@ -221,7 +221,7 @@ export function FillableFormModal({ visible, docId, docTitle, onClose, onSubmitt
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.background },
+  root: { flex: 1, backgroundColor: "#F9F9F8" },
   header: { backgroundColor: theme.colors.brandPrimary, padding: 14, flexDirection: "row", alignItems: "center", gap: 10 },
   title: { flex: 1, color: "#fff", fontWeight: "700", fontSize: 14 },
   submitBtn: { backgroundColor: "#fff", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999 },
