@@ -614,6 +614,10 @@ async def create_document(req: DocumentCreate,
                           current: UserPublic = Depends(get_current_user)):
     obj = Document(**req.dict(), uploaded_by=current.id)
     await db.documents.insert_one(obj.dict())
+    # Phase 4 Slice C: dual-write metadata + upload blob to Supabase Storage.
+    if obj.file_base64:
+        supa_data.upload_document_blob_sync(obj.id, obj.file_base64, obj.mime_type or "application/pdf")
+    await supa_data.upsert_document(obj.dict())
     return obj
 
 
@@ -650,9 +654,39 @@ async def get_document(doc_id: str, _: UserPublic = Depends(get_current_user)):
     return Document(**d)
 
 
+@api.get("/documents/{doc_id}/url")
+async def get_document_signed_url(doc_id: str,
+                                  current: UserPublic = Depends(get_current_user)):
+    """Phase 4 Slice C (additive): return a short-lived Supabase Storage signed
+    URL for the PDF blob. Frontend can switch to loading from this URL instead
+    of pulling base64 over the API for faster document opens.
+
+    Returns 404 if the document is unknown OR if no blob has been uploaded
+    yet (e.g., template-only metadata).
+    """
+    # Resolve metadata via Postgres first (Slice A territory)
+    meta = await supa_data.get_document_storage_path(doc_id)
+    if not meta:
+        # Fallback to Mongo if doc not yet in Postgres (legacy uploads pre-Slice-C)
+        d = await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_base64": 0})
+        if not d:
+            raise HTTPException(404, "Document not found")
+        # Synthesize the path we *would* use; useful when Storage upload happened
+        # but the Postgres row hasn't been refreshed.
+        meta = supa_data._doc_storage_path(doc_id, d.get("mime_type") or "application/pdf")
+    url = supa_data.signed_url_for_document(meta, expires_in_seconds=3600)
+    if not url:
+        raise HTTPException(404, "No stored file for this document")
+    return {"url": url, "expires_in": 3600, "storage_path": meta}
+
+
 @api.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str, _: UserPublic = Depends(require_admin)):
     await db.documents.delete_one({"id": doc_id})
+    # Phase 4 Slice C: also remove from Postgres + Storage.
+    storage_path = await supa_data.delete_document(doc_id)
+    if storage_path:
+        supa_data.delete_document_blob_sync(storage_path)
     return {"ok": True}
 
 
@@ -685,6 +719,13 @@ async def push_document(doc_id: str, req: DocumentPushReq,
         clone["is_template"] = False
         clone["seq"] = None
         await db.documents.insert_one(clone)
+        # Slice C: dual-write clone metadata. Re-upload blob under new id so
+        # signed URLs are stable per recipient.
+        if clone.get("file_base64"):
+            supa_data.upload_document_blob_sync(
+                clone["id"], clone["file_base64"], clone.get("mime_type") or "application/pdf"
+            )
+        await supa_data.upsert_document(clone)
         created_ids.append(clone["id"])
     return {"created": len(created_ids), "ids": created_ids}
 
@@ -790,6 +831,12 @@ async def sign_document(
         is_template=False,
     )
     await db.documents.insert_one(signed.dict())
+    # Slice C: dual-write the signed PDF
+    if signed.file_base64:
+        supa_data.upload_document_blob_sync(
+            signed.id, signed.file_base64, signed.mime_type or "application/pdf"
+        )
+    await supa_data.upsert_document(signed.dict())
     await db.document_views.insert_one({
         "id": str(uuid.uuid4()),
         "document_id": doc_id,
@@ -909,6 +956,12 @@ async def submit_doc_form(doc_id: str, req: SubmitFormReq,
         "form_values": req.values,
     }
     await db.documents.insert_one(new_doc)
+    # Slice C: dual-write filled-form document
+    if new_doc.get("file_base64"):
+        supa_data.upload_document_blob_sync(
+            new_doc["id"], new_doc["file_base64"], "application/pdf"
+        )
+    await supa_data.upsert_document(new_doc)
     return {"id": new_doc["id"], "title": new_doc["title"]}
 
 

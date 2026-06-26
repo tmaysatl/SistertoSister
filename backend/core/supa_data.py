@@ -307,3 +307,131 @@ async def toggle_client_task(task_id: str, completed: bool, completed_at: Option
             "update public.client_tasks set completed=$2, completed_at=$3 where id=$1::uuid",
             task_id, completed, _ts(completed_at),
         ), f"toggle_client_task {task_id}")
+
+
+# ---------------------------------------------------------------------------
+# Documents + Supabase Storage (Slice C)
+# ---------------------------------------------------------------------------
+import base64 as _b64
+from .settings import SUPABASE_STORAGE_BUCKET
+from .supabase import get_supabase_service
+
+
+def _doc_storage_path(doc_id: str, mime_type: str = "application/pdf") -> str:
+    ext = "pdf" if (mime_type or "").endswith("pdf") else ((mime_type or "bin").split("/")[-1] or "bin")
+    return f"documents/{doc_id}.{ext}"
+
+
+def upload_document_blob_sync(doc_id: str, file_b64: str, mime_type: str) -> Optional[str]:
+    """Upload base64 file content to Supabase Storage. Returns storage_path or None."""
+    if not file_b64:
+        return None
+    try:
+        # Strip any data:mime;base64, prefix
+        b = file_b64.split(",", 1)[-1] if "," in file_b64 else file_b64
+        binary = _b64.b64decode(b)
+        path = _doc_storage_path(doc_id, mime_type)
+        sb = get_supabase_service()
+        sb.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+            path=path,
+            file=binary,
+            file_options={"content-type": mime_type or "application/pdf", "upsert": "true"},
+        )
+        return path
+    except Exception as e:
+        log.warning("[supa-storage] upload failed for %s: %s", doc_id, str(e)[:200])
+        return None
+
+
+def delete_document_blob_sync(storage_path: str) -> bool:
+    if not storage_path:
+        return True
+    try:
+        sb = get_supabase_service()
+        sb.storage.from_(SUPABASE_STORAGE_BUCKET).remove([storage_path])
+        return True
+    except Exception as e:
+        log.warning("[supa-storage] delete failed for %s: %s", storage_path, str(e)[:200])
+        return False
+
+
+def signed_url_for_document(storage_path: str, expires_in_seconds: int = 3600) -> Optional[str]:
+    if not storage_path:
+        return None
+    try:
+        sb = get_supabase_service()
+        res = sb.storage.from_(SUPABASE_STORAGE_BUCKET).create_signed_url(storage_path, expires_in_seconds)
+        # supabase-py returns {'signedURL': '...'} (snake_case key 'signedUrl' on newer versions)
+        if isinstance(res, dict):
+            return res.get("signedURL") or res.get("signedUrl") or res.get("signed_url")
+        return None
+    except Exception as e:
+        log.warning("[supa-storage] signed_url failed for %s: %s", storage_path, str(e)[:200])
+        return None
+
+
+def lookup_storage_path_sync(doc_id: str, mime_type: str = "application/pdf") -> Optional[str]:
+    """Best-effort: produce the path we'd expect for a doc (no DB hit)."""
+    return _doc_storage_path(doc_id, mime_type)
+
+
+async def upsert_document(d: dict) -> bool:
+    """Insert/update document metadata in Postgres. `d` is the Document dict."""
+    pool = await get_pg_pool()
+    storage_path = d.get("storage_path") or (
+        _doc_storage_path(d["id"], d.get("mime_type") or "application/pdf")
+        if d.get("file_base64") else None
+    )
+    meta = {k: d.get(k) for k in (
+        "signature_image", "signed_at", "signed_by", "form_data",
+        "public_url", "public_token", "watermark",
+    ) if d.get(k) is not None}
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.documents(id, title, category, owner_id, owner_type,
+                                            storage_path, mime_type, notes, uploaded_by,
+                                            uploaded_at, expires_at, seq, is_template, meta)
+               values($1::uuid, $2, $3, $4::uuid, $5, $6, $7, $8, $9::uuid,
+                      coalesce($10, now()), $11, $12, $13, $14::jsonb)
+               on conflict (id) do update set title=excluded.title,
+                                              category=excluded.category,
+                                              owner_id=excluded.owner_id,
+                                              owner_type=excluded.owner_type,
+                                              storage_path=excluded.storage_path,
+                                              mime_type=excluded.mime_type,
+                                              notes=excluded.notes,
+                                              meta=excluded.meta""",
+            d["id"], d.get("title") or "", d.get("category") or "caregiver",
+            d.get("owner_id"), d.get("owner_type") or "agency",
+            storage_path,
+            d.get("mime_type") or "application/pdf",
+            d.get("notes") or "",
+            d.get("uploaded_by"),
+            _ts(d.get("uploaded_at")),
+            _ts(d.get("expires_at")),
+            d.get("seq"), bool(d.get("is_template", False)),
+            json.dumps(meta),
+        ), f"upsert_document {d.get('id')}")
+
+
+async def delete_document(doc_id: str) -> Optional[str]:
+    """Delete the metadata row; return the storage_path so caller can remove the blob."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "delete from public.documents where id=$1::uuid returning storage_path",
+                doc_id,
+            )
+            return row["storage_path"] if row else None
+        except Exception as e:
+            log.warning("[supa-write] delete_document %s failed: %s", doc_id, str(e)[:200])
+            return None
+
+
+async def get_document_storage_path(doc_id: str) -> Optional[str]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "select storage_path from public.documents where id=$1::uuid", doc_id
+        )
