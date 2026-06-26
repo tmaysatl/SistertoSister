@@ -873,3 +873,88 @@ async def list_onboarding_steps(caregiver_id: Optional[str] = None) -> list[dict
                    order by created_at asc"""
             )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Packet shares (Slice G)
+# ---------------------------------------------------------------------------
+
+async def upsert_packet(p: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.packet_shares(id, token, recipient_name, recipient_role,
+                                                 category, recipient_email, recipient_phone,
+                                                 created_by, created_at, viewed_at, completed_at,
+                                                 signed_ids)
+               values($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid,
+                      coalesce($9, now()), $10, $11, $12::uuid[])
+               on conflict (id) do update set viewed_at=excluded.viewed_at,
+                                              completed_at=excluded.completed_at,
+                                              signed_ids=excluded.signed_ids""",
+            p['id'], p['token'],
+            p.get('recipient_name') or '', p.get('recipient_role') or '',
+            p.get('category'), p.get('recipient_email'), p.get('recipient_phone'),
+            p.get('created_by'),
+            _ts(p.get('created_at')),
+            _ts(p.get('viewed_at')),
+            _ts(p.get('completed_at')),
+            [s for s in (p.get('signed_ids') or []) if s],
+        ), f"upsert_packet {p.get('id')}")
+
+
+async def get_packet_by_token(token: str) -> Optional[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """select id::text, token, recipient_name, recipient_role,
+                      category, recipient_email, recipient_phone,
+                      created_by::text,
+                      to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at,
+                      to_char(viewed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as viewed_at,
+                      to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as completed_at,
+                      coalesce(array(select x::text from unnest(signed_ids) x), '{}')::text[] as signed_ids
+               from public.packet_shares where token=$1""",
+            token,
+        )
+    return dict(row) if row else None
+
+
+async def mark_packet_viewed(token: str, when: Optional[str] = None) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "update public.packet_shares set viewed_at=coalesce(viewed_at, $2) where token=$1",
+            token, _ts(when),
+        ), f"mark_packet_viewed {token[:8]}")
+
+
+async def packet_add_signed_id(token: str, doc_id: str) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "update public.packet_shares "
+            "set signed_ids = (case when $2::uuid = any(signed_ids) then signed_ids "
+            "                       else signed_ids || $2::uuid end) "
+            "where token=$1",
+            token, doc_id,
+        ), f"packet_add_signed_id {token[:8]}")
+
+
+async def mark_packet_completed(token: str, when: Optional[str] = None) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "update public.packet_shares set completed_at=coalesce(completed_at, $2) where token=$1",
+            token, _ts(when),
+        ), f"mark_packet_completed {token[:8]}")
+
+
+async def count_packet_docs(category: str) -> int:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        n = await conn.fetchval(
+            "select count(*) from public.documents where category=$1",
+            category,
+        )
+    return int(n or 0)

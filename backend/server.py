@@ -1328,6 +1328,8 @@ async def share_packet(req: PacketLinkReq,
         "signed_ids": [],
     }
     await db.packet_shares.insert_one(pkt)
+    # Slice G: dual-write to Postgres
+    await supa_data.upsert_packet(pkt)
 
     # Public link (frontend will route /packet/<token>)
     frontend_origin = os.environ.get("PUBLIC_APP_ORIGIN", "")
@@ -1345,13 +1347,17 @@ async def share_packet(req: PacketLinkReq,
 @api.get("/packets/{token_str}")
 async def get_packet(token_str: str):
     """Public endpoint: fetch packet metadata + numbered docs (no PDFs)."""
-    pkt = await db.packet_shares.find_one({"token": token_str}, {"_id": 0})
+    # Slice G: read from Postgres
+    pkt = await supa_data.get_packet_by_token(token_str)
     if not pkt:
         raise HTTPException(404, "Packet not found")
     if not pkt.get("viewed_at"):
+        ts = now_iso()
         await db.packet_shares.update_one(
-            {"token": token_str}, {"$set": {"viewed_at": now_iso()}}
+            {"token": token_str}, {"$set": {"viewed_at": ts}}
         )
+        await supa_data.mark_packet_viewed(token_str, ts)
+        pkt["viewed_at"] = ts
     docs = await db.documents.find(
         {"category": pkt["category"]}, {"_id": 0, "file_base64": 0}
     ).sort("seq", 1).to_list(200)
@@ -1445,17 +1451,32 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
         is_template=False,
     )
     await db.documents.insert_one(signed_doc.dict())
+    # Slice G: dual-write signed PDF to Postgres + Storage
+    signed_dict = signed_doc.dict()
+    # owner_id is the packet token (non-UUID) so don't FK-link in PG
+    signed_dict["owner_id"] = None
+    # uploaded_by is "public-share" (non-UUID) so null it for the FK
+    signed_dict["uploaded_by"] = None
+    storage_path = supa_data.upload_document_blob_sync(
+        signed_doc.id, new_b64, "application/pdf"
+    )
+    signed_dict["storage_path"] = storage_path
+    await supa_data.upsert_document(signed_dict)
     await db.packet_shares.update_one(
         {"token": token_str},
         {"$addToSet": {"signed_ids": doc_id}},
     )
+    # Slice G: mirror signed_id to Postgres
+    await supa_data.packet_add_signed_id(token_str, doc_id)
     # mark complete if all signed
     total = await db.documents.count_documents({"category": pkt["category"]})
     refreshed = await db.packet_shares.find_one({"token": token_str})
     if refreshed and len(refreshed.get("signed_ids", [])) >= total:
+        completion_ts = now_iso()
         await db.packet_shares.update_one(
-            {"token": token_str}, {"$set": {"completed_at": now_iso()}}
+            {"token": token_str}, {"$set": {"completed_at": completion_ts}}
         )
+        await supa_data.mark_packet_completed(token_str, completion_ts)
     return {"ok": True, "signed_doc_id": signed_doc.id}
 
 
