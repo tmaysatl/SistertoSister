@@ -66,6 +66,12 @@ async def register(req: RegisterRequest):
         "created_at": now_iso(),
     }
     await db.users.insert_one(doc)
+    # Slice I: also create the matching Supabase Auth user (same UUID -> FKs
+    # line up across both DBs). Best-effort; trigger will populate profiles.
+    await supa_data.create_supabase_auth_user(
+        user_id=uid, email=req.email, password=req.password,
+        name=req.name, role=req.role,
+    )
     user_public = UserPublic(id=uid, email=req.email, name=req.name,
                              role=req.role, created_at=doc["created_at"])
     token = create_access_token({"sub": uid, "role": req.role})
@@ -1618,6 +1624,11 @@ async def root():
 # ---------- STARTUP: SEED ADMIN ----------
 @app.on_event("startup")
 async def seed_admin():
+    """Seed default admin + caregiver in BOTH Mongo and Supabase Auth.
+
+    Slice I: Supabase users (if missing) are created with the same UUID as
+    the Mongo record so cross-DB foreign keys stay aligned.
+    """
     existing = await db.users.find_one({"email": "admin@healthguard.com"})
     if not existing:
         uid = str(uuid.uuid4())
@@ -1630,6 +1641,11 @@ async def seed_admin():
             "created_at": now_iso(),
         })
         logger.info("Seeded default admin: admin@healthguard.com / Admin@123")
+        await supa_data.create_supabase_auth_user(
+            user_id=uid, email="admin@healthguard.com",
+            password="AdminPassword123!",
+            name="Sister to Sister, PHCP", role="admin",
+        )
     elif existing.get("name") == "Agency Owner":
         # Rebrand legacy seeded admin
         await db.users.update_one(
@@ -1649,6 +1665,11 @@ async def seed_admin():
             "created_at": now_iso(),
         })
         logger.info("Seeded default caregiver")
+        await supa_data.create_supabase_auth_user(
+            user_id=uid, email="caregiver@healthguard.com",
+            password="Caregiver123!",
+            name="Sarah Johnson", role="caregiver",
+        )
 
 
 app.include_router(api)

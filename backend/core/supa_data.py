@@ -1090,3 +1090,95 @@ async def list_training_completions(caregiver_id: Optional[str] = None) -> list[
                    order by completed_at desc"""
             )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# User creation (Slice I): create Supabase Auth user + ensure profiles row
+# ---------------------------------------------------------------------------
+import httpx as _httpx
+
+from .settings import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
+
+async def create_supabase_auth_user(
+    *,
+    user_id: str,
+    email: str,
+    password: str,
+    name: str,
+    role: str,
+) -> bool:
+    """POST /auth/v1/admin/users — create Supabase Auth user with the same UUID
+    so all foreign keys line up. Then upsert the public.profiles row.
+
+    Returns True on success, False otherwise. Never raises so existing Mongo
+    write paths aren't blocked by Supabase outages.
+    """
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return False
+    try:
+        async with _httpx.AsyncClient(timeout=15) as http:
+            r = await http.post(
+                f"{SUPABASE_URL}/auth/v1/admin/users",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                json={
+                    "id": user_id,
+                    "email": email,
+                    "password": password,
+                    "email_confirm": True,
+                    "user_metadata": {"name": name, "role": role},
+                },
+            )
+            if r.status_code >= 400:
+                body = r.text[:200]
+                # 422 already exists - just return False so caller treats as "ok"
+                if "already been registered" in body.lower() or r.status_code == 422:
+                    log.info("[supa-auth] %s already exists", email)
+                    return False
+                log.warning("[supa-auth] create_user %s: %s %s", email, r.status_code, body)
+                return False
+    except Exception as e:
+        log.warning("[supa-auth] create_user %s failed: %s", email, str(e)[:200])
+        return False
+
+    # Upsert profiles row (the on_auth_user_created trigger should handle this,
+    # but explicit upsert here is defensive in case the trigger has been altered).
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                """insert into public.profiles(id, email, name, role, created_at)
+                   values($1::uuid, $2, $3, $4, now())
+                   on conflict (id) do update set email=excluded.email,
+                                                  name=excluded.name,
+                                                  role=excluded.role""",
+                user_id, email.lower(), name, role,
+            )
+        except Exception as e:
+            log.warning("[supa-auth] profile upsert %s failed: %s", email, str(e)[:200])
+    return True
+
+
+async def supabase_auth_user_exists(email: str) -> bool:
+    """Check if a Supabase Auth user with this email already exists."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return False
+    try:
+        async with _httpx.AsyncClient(timeout=10) as http:
+            r = await http.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                params={"email": email},
+            )
+            if r.status_code >= 400:
+                return False
+            users = r.json().get("users", [])
+            return any(u.get("email", "").lower() == email.lower() for u in users)
+    except Exception:
+        return False
