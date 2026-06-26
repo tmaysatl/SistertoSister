@@ -7,6 +7,7 @@ Pydantic models in `models.py`.
 from __future__ import annotations
 from typing import Optional, Any
 from datetime import datetime
+from uuid import UUID
 import asyncpg
 
 from .supabase import get_pg_pool
@@ -18,8 +19,7 @@ def _row_to_dict(row: Optional[asyncpg.Record]) -> Optional[dict]:
     d = dict(row)
     # Stringify UUID + datetimes so they're JSON-serializable / Pydantic friendly.
     for k, v in list(d.items()):
-        if hasattr(v, 'hex') and not isinstance(v, (bytes, bytearray)):
-            # UUID
+        if isinstance(v, UUID):
             d[k] = str(v)
         elif isinstance(v, datetime):
             d[k] = v.isoformat()
