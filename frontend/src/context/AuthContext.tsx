@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import { API_BASE } from "../api/client";
+import { supabase, SUPABASE_CONFIGURED } from "../lib/supabase";
 
 export type Role = "admin" | "caregiver";
 
@@ -14,10 +15,14 @@ export type User = {
   created_at: string;
 };
 
+type AuthMode = "supabase" | "legacy";
+
 type AuthState = {
   user: User | null;
   token: string | null;
   loading: boolean;
+  mode: AuthMode;
+  setMode: (m: AuthMode) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string, role: Role) => Promise<void>;
   logout: () => Promise<void>;
@@ -25,30 +30,71 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
 
+const MODE_KEY = "authMode";
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Default to Supabase if it's configured; otherwise legacy.
+  const [mode, setModeState] = useState<AuthMode>(SUPABASE_CONFIGURED ? "supabase" : "legacy");
 
+  // Bootstrap: detect persisted mode + restore Supabase session OR legacy creds.
   useEffect(() => {
     (async () => {
       try {
-        const t = await AsyncStorage.getItem("userToken");
-        const u = await AsyncStorage.getItem("userInfo");
-        if (t) setToken(t);
-        if (u) setUser(JSON.parse(u));
+        const storedMode = (await AsyncStorage.getItem(MODE_KEY)) as AuthMode | null;
+        const effectiveMode: AuthMode = storedMode ?? (SUPABASE_CONFIGURED ? "supabase" : "legacy");
+        setModeState(effectiveMode);
+
+        if (effectiveMode === "supabase" && SUPABASE_CONFIGURED) {
+          const { data } = await supabase.auth.getSession();
+          const session = data.session;
+          if (session?.access_token) {
+            setToken(session.access_token);
+            // Pull merged profile from /api/supabase/me (Mongo bridge + Postgres profile)
+            try {
+              const res = await fetch(`${API_BASE}/supabase/me`, {
+                headers: { Authorization: `Bearer ${session.access_token}` },
+              });
+              if (res.ok) {
+                const body = await res.json();
+                setUser(body.user as User);
+              }
+            } catch { /* ignore */ }
+          }
+        } else {
+          const t = await AsyncStorage.getItem("userToken");
+          const u = await AsyncStorage.getItem("userInfo");
+          if (t) setToken(t);
+          if (u) setUser(JSON.parse(u));
+        }
       } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  const persist = async (t: string, u: User) => {
+  // Keep token in sync with Supabase auth state changes.
+  useEffect(() => {
+    if (mode !== "supabase" || !SUPABASE_CONFIGURED) return;
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setToken(session?.access_token ?? null);
+      if (!session) setUser(null);
+    });
+    return () => { sub.subscription?.unsubscribe(); };
+  }, [mode]);
+
+  const setMode = async (m: AuthMode) => {
+    await AsyncStorage.setItem(MODE_KEY, m);
+    setModeState(m);
+  };
+
+  const persistLegacy = async (t: string, u: User) => {
     await AsyncStorage.setItem("userToken", t);
     await AsyncStorage.setItem("userInfo", JSON.stringify(u));
     setToken(t);
     setUser(u);
-    // Register for push (native only; safe no-op in Expo Go without plugin)
     if (Platform.OS !== "web") {
       try {
         const { status } = await Notifications.requestPermissionsAsync();
@@ -57,11 +103,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await fetch(`${API_BASE}/register-push`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              user_id: u.id,
-              platform: Platform.OS,
-              device_token: tokenResp.data,
-            }),
+            body: JSON.stringify({ user_id: u.id, platform: Platform.OS, device_token: tokenResp.data }),
           });
         }
       } catch (e) {
@@ -70,42 +112,83 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const login = async (email: string, password: string) => {
+  const loginSupabase = async (email: string, password: string) => {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(error.message);
+    if (!data.session?.access_token) throw new Error("No session returned");
+    setToken(data.session.access_token);
+    // Resolve user via backend bridge so we get the Mongo UserPublic.
+    const res = await fetch(`${API_BASE}/supabase/me`, {
+      headers: { Authorization: `Bearer ${data.session.access_token}` },
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || "Profile lookup failed");
+    }
+    const body = await res.json();
+    setUser(body.user as User);
+  };
+
+  const loginLegacy = async (email: string, password: string) => {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(t || "Login failed");
-    }
+    if (!res.ok) throw new Error((await res.text()) || "Login failed");
     const data = await res.json();
-    await persist(data.access_token, data.user);
+    await persistLegacy(data.access_token, data.user);
+  };
+
+  const login = async (email: string, password: string) => {
+    if (mode === "supabase" && SUPABASE_CONFIGURED) {
+      await loginSupabase(email.trim(), password);
+    } else {
+      await loginLegacy(email.trim(), password);
+    }
   };
 
   const register = async (email: string, password: string, name: string, role: Role) => {
+    if (mode === "supabase" && SUPABASE_CONFIGURED) {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { name, role } },
+      });
+      if (error) throw new Error(error.message);
+      if (data.session?.access_token) {
+        setToken(data.session.access_token);
+        const res = await fetch(`${API_BASE}/supabase/me`, {
+          headers: { Authorization: `Bearer ${data.session.access_token}` },
+        });
+        if (res.ok) {
+          const body = await res.json();
+          setUser(body.user as User);
+        }
+      }
+      return;
+    }
     const res = await fetch(`${API_BASE}/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password, name, role }),
     });
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(t || "Register failed");
-    }
+    if (!res.ok) throw new Error((await res.text()) || "Register failed");
     const data = await res.json();
-    await persist(data.access_token, data.user);
+    await persistLegacy(data.access_token, data.user);
   };
 
   const logout = async () => {
+    if (mode === "supabase" && SUPABASE_CONFIGURED) {
+      try { await supabase.auth.signOut(); } catch { /* ignore */ }
+    }
     await AsyncStorage.multiRemove(["userToken", "userInfo"]);
     setToken(null);
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, token, loading, mode, setMode, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

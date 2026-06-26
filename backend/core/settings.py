@@ -36,3 +36,14 @@ MS_AUTHORITY = (
 )
 MS_BINDER_FOLDER = os.environ.get('MS_BINDER_FOLDER', 'Audit-Binders')
 MS_BINDER_TZ = os.environ.get('MS_BINDER_TIMEZONE', 'America/New_York')
+
+# --- Supabase ---
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY', '')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
+SUPABASE_DB_URL = os.environ.get('SUPABASE_DB_URL', '')
+SUPABASE_DIRECT_URL = os.environ.get('SUPABASE_DIRECT_URL', '')
+SUPABASE_STORAGE_BUCKET = os.environ.get('SUPABASE_STORAGE_BUCKET', 'documents')
+SUPABASE_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and SUPABASE_JWT_SECRET)
+

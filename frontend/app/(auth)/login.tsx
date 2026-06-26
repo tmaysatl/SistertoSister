@@ -11,12 +11,20 @@ import { useAuth } from "@/src/context/AuthContext";
 import { theme, BRAND_NAME, BRAND_TAGLINE, LOGO_URL } from "@/src/theme";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, mode, setMode } = useAuth();
   const router = useRouter();
   const [email, setEmail] = useState("admin@healthguard.com");
-  const [password, setPassword] = useState("Admin@123");
+  const [password, setPassword] = useState(mode === "supabase" ? "AdminPassword123!" : "Admin@123");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const toggleMode = async () => {
+    const next = mode === "supabase" ? "legacy" : "supabase";
+    await setMode(next);
+    // adjust default password hint to match active mode
+    setPassword(next === "supabase" ? "AdminPassword123!" : "Admin@123");
+    setError(null);
+  };
 
   const onSubmit = async () => {
     setError(null);
@@ -57,6 +65,21 @@ export default function Login() {
         <View style={styles.form}>
           <Text style={styles.title}>Welcome back</Text>
           <Text style={styles.subtitle}>Sign in to your agency workspace</Text>
+
+          <Pressable
+            testID="auth-mode-toggle"
+            onPress={toggleMode}
+            style={styles.modePill}
+          >
+            <Ionicons
+              name={mode === "supabase" ? "cloud-done-outline" : "server-outline"}
+              size={14}
+              color={theme.colors.brandPrimary}
+            />
+            <Text style={styles.modePillText}>
+              Auth: {mode === "supabase" ? "Supabase" : "Legacy (MongoDB)"} · tap to switch
+            </Text>
+          </Pressable>
 
           <View style={styles.field}>
             <Text style={styles.label}>Email</Text>
@@ -109,7 +132,9 @@ export default function Login() {
           <View style={styles.hintBox}>
             <Ionicons name="information-circle-outline" size={16} color={theme.colors.muted} />
             <Text style={styles.hint}>
-              Demo: admin@healthguard.com / Admin@123  ·  caregiver@healthguard.com / Caregiver@123
+              {mode === "supabase"
+                ? "Supabase: admin@healthguard.com / AdminPassword123!  ·  caregiver@healthguard.com / Caregiver123!"
+                : "Legacy: admin@healthguard.com / Admin@123  ·  caregiver@healthguard.com / Caregiver@123"}
             </Text>
           </View>
         </View>
@@ -163,4 +188,18 @@ const styles = StyleSheet.create({
     padding: 12, borderRadius: 10, marginTop: 8,
   },
   hint: { flex: 1, fontSize: 11, color: theme.colors.muted, lineHeight: 16 },
+  modePill: {
+    flexDirection: "row",
+    gap: 6,
+    alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: theme.colors.surfaceTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    marginBottom: 4,
+  },
+  modePillText: { fontSize: 11, color: theme.colors.brandPrimary, fontWeight: "600" },
 });

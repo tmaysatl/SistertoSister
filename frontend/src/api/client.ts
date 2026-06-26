@@ -1,12 +1,26 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabase, SUPABASE_CONFIGURED } from "../lib/supabase";
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 
 export const API_BASE = `${BASE}/api`;
 
 async function authHeaders(): Promise<Record<string, string>> {
-  const token = await AsyncStorage.getItem("userToken");
   const h: Record<string, string> = { "Content-Type": "application/json" };
+  // Prefer the live Supabase access token if a session is active.
+  if (SUPABASE_CONFIGURED) {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const sbToken = data.session?.access_token;
+      if (sbToken) {
+        h.Authorization = `Bearer ${sbToken}`;
+        return h;
+      }
+    } catch {
+      /* ignore — fall through to legacy token */
+    }
+  }
+  const token = await AsyncStorage.getItem("userToken");
   if (token) h.Authorization = `Bearer ${token}`;
   return h;
 }

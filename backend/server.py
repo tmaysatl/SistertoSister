@@ -36,6 +36,7 @@ from models import (
 )
 from routers import shifts as shifts_router
 from routers import ms_graph as ms_graph_router
+from routers import supabase_router
 
 
 app = FastAPI()
@@ -1563,6 +1564,7 @@ app.include_router(api)
 # Mount modular routers under the same /api prefix
 app.include_router(shifts_router.router, prefix="/api")
 app.include_router(ms_graph_router.router, prefix="/api")
+app.include_router(supabase_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
