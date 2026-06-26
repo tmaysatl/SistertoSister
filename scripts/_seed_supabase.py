@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / '.env')
+load_dotenv(Path(__file__).resolve().parents[1] / 'backend' / '.env')
 from supabase import create_client
 
 url = os.environ['SUPABASE_URL']

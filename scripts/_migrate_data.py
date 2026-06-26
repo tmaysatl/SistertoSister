@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Optional, Any
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / '.env')
+load_dotenv(Path(__file__).resolve().parents[1] / 'backend' / '.env')
 
 from motor.motor_asyncio import AsyncIOMotorClient
 import asyncpg

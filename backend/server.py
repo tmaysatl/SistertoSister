@@ -21,6 +21,7 @@ from core.security import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_admin, oauth2_scheme,
 )
+from core import supa_data
 from core.push import send_push, _push_client
 from core.settings import EMERGENT_LLM_KEY
 from core.pdf_utils import _load_logo, _make_watermark, stamp_pdf
@@ -91,10 +92,9 @@ async def me(current: UserPublic = Depends(get_current_user)):
 # ---------- USERS / CAREGIVERS ----------
 @api.get("/caregivers", response_model=List[UserPublic])
 async def list_caregivers(_: UserPublic = Depends(get_current_user)):
-    docs = await db.users.find(
-        {"role": "caregiver"}, {"_id": 0, "hashed_password": 0}
-    ).to_list(500)
-    return [UserPublic(**d) for d in docs]
+    # Phase 4: source from Supabase Postgres profiles
+    rows = await supa_data.list_users_by_role("caregiver")
+    return [UserPublic(**r) for r in rows]
 
 
 # ---------- CLIENTS ----------
@@ -107,13 +107,15 @@ async def create_client(req: ClientCreate, _: UserPublic = Depends(require_admin
 
 @api.get("/clients", response_model=List[Client])
 async def list_clients(_: UserPublic = Depends(get_current_user)):
-    docs = await db.clients.find({}, {"_id": 0}).to_list(500)
-    return [Client(**d) for d in docs]
+    # Phase 4: source from Supabase Postgres
+    rows = await supa_data.list_clients()
+    return [Client(**r) for r in rows]
 
 
 @api.get("/clients/{client_id}", response_model=Client)
 async def get_client(client_id: str, _: UserPublic = Depends(get_current_user)):
-    d = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    # Phase 4: source from Supabase Postgres
+    d = await supa_data.get_client(client_id)
     if not d:
         raise HTTPException(404, "Client not found")
     return Client(**d)
@@ -1413,31 +1415,30 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
 # ---------- DASHBOARD STATS ----------
 @api.get("/stats")
 async def stats(current: UserPublic = Depends(get_current_user)):
-    total_clients = await db.clients.count_documents({})
-    total_caregivers = await db.users.count_documents({"role": "caregiver"})
-    total_documents = await db.documents.count_documents({})
+    # Phase 4: source from Supabase Postgres
+    counts = await supa_data.get_dashboard_counts()
+    # assignments still in Mongo for now (Phase 4b)
     total_assignments = await db.assignments.count_documents({})
-    total_training = await db.training.count_documents({})
 
-    # compliance: % onboarding steps complete + % training complete
-    total_steps = await db.onboarding.count_documents({})
-    done_steps = await db.onboarding.count_documents({"completed": True})
+    total_caregivers = counts['caregivers']
+    total_training = counts['trainings']
+    total_steps = counts['onboarding_total']
+    done_steps = counts['onboarding_done']
 
     expected_completions = total_training * max(total_caregivers, 1)
-    actual_completions = await db.training_completions.count_documents({})
+    actual_completions = counts['training_completions']
 
     onboard_pct = (done_steps / total_steps * 100) if total_steps else 100
     training_pct = (actual_completions / expected_completions * 100) if expected_completions else 100
     audit_readiness = round((onboard_pct + training_pct) / 2)
 
-    # Pending actions
     pending_onboarding = total_steps - done_steps
     pending_training = max(0, expected_completions - actual_completions)
 
     return {
-        "total_clients": total_clients,
+        "total_clients": counts['clients'],
         "total_caregivers": total_caregivers,
-        "total_documents": total_documents,
+        "total_documents": counts['documents'],
         "total_assignments": total_assignments,
         "total_training": total_training,
         "audit_readiness": audit_readiness,
