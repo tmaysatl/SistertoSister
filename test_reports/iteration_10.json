@@ -1,0 +1,36 @@
+{
+  "summary": "Phase 4 Slice A (first runtime cutover slice) verified GREEN end-to-end. The 5 converted READ endpoints (/api/auth/me, /api/caregivers, /api/clients, /api/clients/{id}, /api/stats) now serve identical data from Supabase Postgres under BOTH legacy HS256 and Supabase ES256 JWTs. Backend pytest: 21/21 PASS (test_iteration10_phase4a_postgres_reads.py). Highlights: (1) Legacy login admin@healthguard.com/Admin@123 still returns HS256 token; Supabase login AdminPassword123! returns ES256 JWT with user.id=8f16fe69-b54e-421a-bfe5-e14900e7bacd. (2) /api/auth/me under both tokens returns the admin profile id=8f16fe69-b54e-421a-bfe5-e14900e7bacd, role=admin (sourced from Postgres profiles via core/security._user_from_legacy_jwt -> supa_data.get_user_by_id; Mongo fallback is no longer hit). (3) /api/caregivers returns 12 rows from Postgres profiles where role='caregiver'. (4) /api/clients returns 1 client whose id starts with caf304a5; /api/clients/{id} round-trips correctly. (5) /api/stats returns total_clients=1, total_caregivers=12, total_documents=50, total_training=0, total_assignments=2 (assignments still Mongo per Slice A contract), audit_readiness numeric (50). (6) Stats payload is byte-identical between legacy and Supabase tokens. Mongo regression endpoints still work: /api/documents (50 items), /api/assignments (2), /api/onboarding (200), /api/shifts (200). Direct Postgres parity via SUPABASE_DIRECT_URL: profiles=13, clients=1, documents=50, caregivers=12. Frontend (Expo web preview, mobile viewport 390x844): both login modes redirect to '/' with Overview showing 1 Client / 12 Caregivers / 50 Documents / 0 Trainings; Team tab loads (default Clients subtab shows Test Client Jones, Caregivers/Onboarding subtabs present); Documents tab shows 'Document Vault · 50 items'; Schedule tab shows Day/Week toggle and renders shifts; logout button (data-testid=logout-button) is present and clickable. Auth mode pill correctly toggles between 'Auth: Supabase' and 'Auth: Legacy'. No critical or minor bugs found in Phase 4 Slice A.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration10_phase4a_postgres_reads.py",
+    "/app/test_reports/pytest/iteration10_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "core/supa_data.py _row_to_dict uses 'hasattr(v, hex)' to detect UUIDs. That heuristic also matches bytes objects (which we exclude) but would match anything with a .hex attribute (e.g., int.hex_float was removed; but it remains fragile). Recommend `isinstance(v, uuid.UUID)` for clarity.",
+    "core/security.py:_user_from_legacy_jwt — Mongo fallback is dead code as soon as 13/13 profile UUIDs are aligned (verified in iteration_9). Safe to remove in Phase 4 Slice B once all WRITE paths also flush to Postgres, otherwise a newly-created Mongo user won't appear via /api/auth/me until they show up in Postgres.",
+    "server.py /api/stats: total_training is still 0 because public.training count is 0, but expected_completions uses total_training * max(total_caregivers,1) which then makes training_pct=100 (since expected==0). Cosmetically the dashboard shows 'Training 100%' even though there are no training records — this is pre-existing behaviour, not a Phase 4a regression, but worth surfacing.",
+    "Backend reload warning 'WatchFiles detected changes in tests/test_iteration10_phase4a_postgres_reads.py' — uvicorn --reload watches /app/backend root including /app/backend/tests. Adding tests/ to reload-exclude would prevent test-file edits from bouncing the backend mid-run."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration10_phase4a_postgres_reads.py (new — 21 pytest cases covering Phase 4 Slice A)"
+  ],
+  "success_rate": {
+    "backend": "100% (21/21 pytest cases)",
+    "frontend": "100% (login + dashboard + Team + Documents + Schedule + logout all green for both auth modes)"
+  },
+  "seed_data_creation": "None. Read-only regression against the existing Phase 3 dataset.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 4 Slice A is GREEN. Slice B will convert WRITE paths (POST/DELETE /api/clients, POST /api/caregivers, etc.) to Postgres. Reuse /app/backend/tests/test_iteration10_phase4a_postgres_reads.py — the fixtures legacy_token, supabase_token, supabase_login, pg_counts and the constants EXPECTED_ADMIN_UUID / EXPECTED_TOTAL_* are stable. The 5 converted READ endpoints use core.supa_data (asyncpg, statement_cache_size=0 already configured in supabase pool). Mongo fallback in core/security._user_from_legacy_jwt is now dead under happy-path because Postgres has all 13 profiles; main agent should plan to drop it in Slice B. Note: /api/stats still pulls total_assignments from Mongo (counts.assignments not yet implemented in supa_data.get_dashboard_counts) — that is correct for Slice A.",
+  "rca_of_issue": "N/A — no failures."
+}
