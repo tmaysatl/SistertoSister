@@ -1,0 +1,29 @@
+{
+  "summary": "Phase 2 dual-mode auth (MongoDB legacy HS256 + Supabase ES256 via JWKS) fully verified end-to-end. Backend: 15/15 pytest cases passed including /api/supabase/status (enabled=true, db=ok, tables=15, profiles=2, storage_buckets includes 'documents'), legacy login + token authenticates /api/stats|/documents|/clients|/caregivers, Supabase password-grant token (ES256) authenticates the same routes, /api/supabase/me returns merged Mongo UserPublic + Postgres profile row, and garbage/missing tokens return 401. Frontend: auth-mode-toggle pill renders defaulting to Supabase, tapping flips to 'Legacy (MongoDB)' and updates hint text, Supabase login (admin@healthguard.com / AdminPassword123!) redirects to / and dashboard shows 1 client / 12 caregivers / 50 documents, legacy login (Admin@123) also redirects + loads dashboard, page refresh restores Supabase session (no bounce to /login), and logout button (testID=logout-button) returns to /login and clears AsyncStorage in both modes. No bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_supabase_dual_auth.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "core/security.py lazy-creates a Mongo user record for a Supabase JWT whose email is not in Mongo (with empty hashed_password). This is intentional for migration but means any successfully Supabase-authenticated email could create a Mongo shadow record - acceptable for Phase 2 but watch for drift in Phase 3+.",
+    "supabase_router.py /supabase/status swallows storage errors into 'storage_error' but still returns 200; UI should treat missing 'storage_buckets' key as a soft warning."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "None - used pre-seeded admin@healthguard.com accounts in both MongoDB (Admin@123) and Supabase (AdminPassword123!).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 2 dual-auth verified. Frontend uses EXPO_PUBLIC_BACKEND_URL (not EXPO_BACKEND_URL) - see /app/frontend/.env. Logout button testID is 'logout-button' (in tabs header). Auth mode persists in AsyncStorage key 'authMode'. Supabase JWT validation uses PyJWKClient against https://wzshjedcbkygohcpytgf.supabase.co/auth/v1/.well-known/jwks.json with audience='authenticated'. For Phase 3 (Storage / RLS / data migration), reuse test_iteration8_supabase_dual_auth.py token fixtures.",
+  "rca_of_issue": "N/A - no failures encountered."
+}
