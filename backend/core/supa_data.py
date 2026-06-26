@@ -1162,6 +1162,81 @@ async def create_supabase_auth_user(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Integrations (Slice J): MS Graph tokens + connection config
+#
+# Postgres schema:
+#   integrations(id uuid pk, provider text unique, user_id uuid?,
+#                config jsonb, tokens jsonb, connected_at, updated_at)
+#
+# Mongo schema (legacy):
+#   {_id: 'ms_connection', provider: 'microsoft',
+#    refresh_token, scope, connected_email, email_to, last_export, updated_at}
+# ---------------------------------------------------------------------------
+
+# Standard provider key used in Postgres for the MS 365 / Graph integration.
+MS_PROVIDER = "microsoft_graph"
+
+
+async def upsert_integration_tokens(
+    *, provider: str, tokens: dict, config: Optional[dict] = None,
+    user_id: Optional[str] = None,
+) -> bool:
+    """Upsert an `integrations` row by unique `provider` key.
+
+    Merges into existing `tokens` and `config` JSONB so partial updates
+    (e.g. just `refresh_token`, or just `email_to`) don't blow away the
+    other side. Best-effort — never raises.
+    """
+    pool = await get_pg_pool()
+    cfg = config or {}
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.integrations(provider, user_id, tokens, config,
+                                                connected_at, updated_at)
+               values($1, $2::uuid, $3::jsonb, $4::jsonb, now(), now())
+               on conflict (provider) do update set
+                  tokens = public.integrations.tokens || excluded.tokens,
+                  config = public.integrations.config || excluded.config,
+                  user_id = coalesce(excluded.user_id, public.integrations.user_id),
+                  updated_at = now()""",
+            provider, user_id, json.dumps(tokens or {}), json.dumps(cfg),
+        ), f"upsert_integration {provider}")
+
+
+async def get_integration(provider: str) -> Optional[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """select provider, user_id::text, tokens, config,
+                      to_char(connected_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as connected_at,
+                      to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as updated_at
+               from public.integrations where provider=$1""",
+            provider,
+        )
+    if row is None:
+        return None
+    d = dict(row)
+    # JSONB returns as Python dict already via asyncpg+jsonb codec; defensive coerce.
+    for k in ("tokens", "config"):
+        v = d.get(k)
+        if isinstance(v, str):
+            try:
+                d[k] = json.loads(v)
+            except Exception:
+                d[k] = {}
+    return d
+
+
+async def delete_integration(provider: str) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "delete from public.integrations where provider=$1",
+            provider,
+        ), f"delete_integration {provider}")
+
+
 async def supabase_auth_user_exists(email: str) -> bool:
     """Check if a Supabase Auth user with this email already exists."""
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):

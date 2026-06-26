@@ -101,3 +101,53 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Build a HIPAA-ready home health agency compliance app. Currently in the middle of a
+  multi-phase database migration from MongoDB to Supabase (Postgres + Auth + Storage).
+  Dual-write pattern keeps Mongo authoritative until Phase 7 cutover.
+
+backend:
+  - task: "Phase 5 Slice J — MS Graph integrations dual-write (Mongo + Postgres)"
+    implemented: true
+    working: true
+    file: "/app/backend/routers/ms_graph.py, /app/backend/core/supa_data.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added supa_data.upsert_integration_tokens / get_integration / delete_integration
+          helpers (JSONB merge on conflict, never raises). Modified _ms_save_tokens,
+          ms_disconnect, and ms_email_recipients in routers/ms_graph.py to dual-write
+          to the Postgres public.integrations table (provider='microsoft_graph').
+          Mongo (db.integrations) remains the read source for /api/ms/status until
+          Phase 6 frontend cutover. Note: /api/register-push only relays to the
+          Emergent push service — no local DB writes, so nothing to migrate there.
+          Smoke test _smoke_slice_j.py PASSES end-to-end (email-recipients, refresh
+          token merge, disconnect cascade). All previous slices A–I smoke tests
+          still PASS (no regressions).
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 10
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Phase 5 Slice J — MS Graph integrations dual-write (Mongo + Postgres)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Slice J complete. MS Graph /api/ms/* endpoints now dual-write the
+      `integrations` table to both MongoDB and Supabase Postgres.
+      Push tokens require no migration (relayed to Emergent, not persisted).
+      Please run a backend regression on /api/ms/status, /api/ms/email-recipients,
+      and /api/ms/disconnect, plus a quick auth+stats smoke from the frontend.

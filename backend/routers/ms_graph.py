@@ -22,6 +22,7 @@ from core.settings import (
     MS_AUTHORITY, MS_BINDER_FOLDER, MS_BINDER_TZ, MS_CLIENT_ID,
     MS_CLIENT_SECRET, MS_REDIRECT_URI, MS_SCOPES, MS_TENANT_ID,
 )
+from core import supa_data
 from models import UserPublic, now_iso
 
 router = APIRouter(tags=['ms-graph'])
@@ -63,6 +64,28 @@ async def _ms_save_tokens(
     await db.integrations.update_one(
         {'_id': MS_CONNECTION_DOC_ID}, {'$set': update}, upsert=True,
     )
+
+    # Slice J: dual-write to Postgres `integrations` table.
+    # tokens JSONB keeps refresh_token + scope; everything else goes in config.
+    tokens_patch = {}
+    if update.get('refresh_token'):
+        tokens_patch['refresh_token'] = update['refresh_token']
+    if update.get('scope'):
+        tokens_patch['scope'] = update['scope']
+    config_patch: dict = {}
+    if update.get('connected_email'):
+        config_patch['connected_email'] = update['connected_email']
+    if extra:
+        # extra may include {'last_export': {...}} or {'email_to': '...'}
+        config_patch.update({k: v for k, v in extra.items() if v is not None})
+    try:
+        await supa_data.upsert_integration_tokens(
+            provider=supa_data.MS_PROVIDER,
+            tokens=tokens_patch,
+            config=config_patch,
+        )
+    except Exception as e:
+        logger.warning(f'[supa-write] ms integration upsert failed: {e}')
 
 
 async def _ms_get_access_token() -> Optional[str]:
@@ -506,6 +529,11 @@ padding:12px 22px;border-radius:999px;font-weight:700;text-decoration:none}}
 @router.post('/ms/disconnect')
 async def ms_disconnect(current: UserPublic = Depends(require_admin)):
     await db.integrations.delete_one({'_id': MS_CONNECTION_DOC_ID})
+    # Slice J: dual-delete from Postgres
+    try:
+        await supa_data.delete_integration(supa_data.MS_PROVIDER)
+    except Exception as e:
+        logger.warning(f'[supa-write] ms disconnect failed: {e}')
     return {'ok': True}
 
 
@@ -513,14 +541,24 @@ async def ms_disconnect(current: UserPublic = Depends(require_admin)):
 async def ms_email_recipients(
     req: MsEmailReq, current: UserPublic = Depends(require_admin),
 ):
+    email_to = (req.email_to or '').strip()
     await db.integrations.update_one(
         {'_id': MS_CONNECTION_DOC_ID},
         {'$set': {
-            'email_to': (req.email_to or '').strip(),
+            'email_to': email_to,
             'updated_at': now_iso(),
         }},
         upsert=True,
     )
+    # Slice J: dual-write to Postgres config
+    try:
+        await supa_data.upsert_integration_tokens(
+            provider=supa_data.MS_PROVIDER,
+            tokens={},
+            config={'email_to': email_to},
+        )
+    except Exception as e:
+        logger.warning(f'[supa-write] ms email_recipients upsert failed: {e}')
     return {'ok': True}
 
 
