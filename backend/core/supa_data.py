@@ -679,3 +679,126 @@ async def find_shift(shift_id: str) -> Optional[dict]:
             "select id::text from public.shifts where id=$1::uuid", shift_id
         )
     return _row_to_dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Chat: DMs (chat_dms) + AI Assistant (chat_messages)  -- Slice E
+# ---------------------------------------------------------------------------
+
+async def insert_dm(m: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.chat_dms(id, from_id, from_name, to_id, to_name,
+                                           text, read, created_at)
+               values($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7,
+                      coalesce($8, now()))
+               on conflict (id) do update set read=excluded.read""",
+            m['id'], m['from_id'], m.get('from_name') or '',
+            m['to_id'], m.get('to_name') or '',
+            m.get('text') or '', bool(m.get('read', False)),
+            _ts(m.get('created_at')),
+        ), f"insert_dm {m.get('id')}")
+
+
+async def list_dm_threads(user_id: str) -> list[dict]:
+    """Return one entry per conversation partner, with last message + unread count.
+    Each entry also includes the partner's photo_base64 and role from profiles.
+    """
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        # CTE: classify each message by 'other_party' (the one who isn't `user_id`),
+        # rank in reverse chronological order per other_party, take rank=1 as the
+        # 'last message' row; also count unread (where to_id=user_id AND read=false).
+        rows = await conn.fetch(
+            """
+            with own as (
+              select id, from_id, from_name, to_id, to_name, text, read, created_at,
+                     case when from_id = $1::uuid then to_id else from_id end as other_id,
+                     case when from_id = $1::uuid then to_name else from_name end as other_name
+              from public.chat_dms
+              where from_id = $1::uuid or to_id = $1::uuid
+            ),
+            ranked as (
+              select *, row_number() over (partition by other_id order by created_at desc) as rn
+              from own
+            ),
+            unread_cnt as (
+              select other_id, count(*) as unread
+              from own
+              where to_id = $1::uuid and read = false
+              group by other_id
+            )
+            select r.other_id::text   as other_id,
+                   r.other_name        as other_name,
+                   r.text              as last_message,
+                   to_char(r.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as last_at,
+                   coalesce(u.unread, 0) as unread,
+                   p.photo_base64,
+                   p.role
+            from ranked r
+            left join unread_cnt u on u.other_id = r.other_id
+            left join public.profiles p on p.id = r.other_id
+            where r.rn = 1
+            order by r.created_at desc
+            """,
+            user_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_dm_conversation(user_a: str, user_b: str) -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """select id::text, from_id::text, from_name, to_id::text, to_name,
+                      text, read,
+                      to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at
+               from public.chat_dms
+               where (from_id = $1::uuid and to_id = $2::uuid)
+                  or (from_id = $2::uuid and to_id = $1::uuid)
+               order by created_at asc
+               limit 500""",
+            user_a, user_b,
+        )
+    return [dict(r) for r in rows]
+
+
+async def mark_dm_read(recipient_id: str, sender_id: str) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "update public.chat_dms set read=true "
+            "where to_id=$1::uuid and from_id=$2::uuid and read=false",
+            recipient_id, sender_id,
+        ), f"mark_dm_read {recipient_id}/{sender_id}")
+
+
+# --- AI Assistant chat ---
+
+async def insert_chat_message(m: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.chat_messages(id, session_id, user_id, role, content, created_at)
+               values($1::uuid, $2, $3::uuid, $4, $5, coalesce($6, now()))
+               on conflict (id) do nothing""",
+            m['id'], m['session_id'], m['user_id'],
+            m.get('role') or 'user', m.get('content') or '',
+            _ts(m.get('created_at')),
+        ), f"insert_chat_message {m.get('id')}")
+
+
+async def list_chat_messages(session_id: str, user_id: str) -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """select id::text, session_id, user_id::text, role, content,
+                      to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at
+               from public.chat_messages
+               where session_id = $1 and user_id = $2::uuid
+               order by created_at asc
+               limit 500""",
+            session_id, user_id,
+        )
+    return [dict(r) for r in rows]

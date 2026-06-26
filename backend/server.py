@@ -331,6 +331,8 @@ async def send_message(req: ChatSendReq,
         "read": False,
     }
     await db.chat_dms.insert_one(msg)
+    # Slice E: dual-write to Postgres
+    await supa_data.insert_dm(msg)
     # Fire push (non-blocking)
     try:
         await send_push(
@@ -349,58 +351,29 @@ async def send_message(req: ChatSendReq,
 @api.get("/chat/threads")
 async def list_threads(current: UserPublic = Depends(get_current_user)):
     """Return list of conversations with most recent message + unread count."""
-    pipeline = [
-        {"$match": {"$or": [{"from_id": current.id}, {"to_id": current.id}]}},
-        {"$sort": {"created_at": -1}},
-    ]
-    threads: dict = {}
-    async for m in db.chat_dms.aggregate(pipeline):
-        other = m["to_id"] if m["from_id"] == current.id else m["from_id"]
-        other_name = m["to_name"] if m["from_id"] == current.id else m["from_name"]
-        if other not in threads:
-            threads[other] = {
-                "other_id": other, "other_name": other_name,
-                "last_message": m["text"], "last_at": m["created_at"],
-                "unread": 0,
-            }
-        if m["to_id"] == current.id and not m.get("read"):
-            threads[other]["unread"] += 1
-    # Look up other_user photo for nicer UI
-    ids = list(threads.keys())
-    if ids:
-        async for u in db.users.find(
-            {"id": {"$in": ids}}, {"_id": 0, "id": 1, "photo_base64": 1, "role": 1}
-        ):
-            if u["id"] in threads:
-                threads[u["id"]]["photo_base64"] = u.get("photo_base64")
-                threads[u["id"]]["role"] = u.get("role")
-    return list(threads.values())
+    # Slice E: read from Postgres via a single SQL query (photo + role joined in).
+    return await supa_data.list_dm_threads(current.id)
 
 
 @api.get("/chat/messages")
 async def get_messages(with_user: str = Query(..., alias="with"),
                        current: UserPublic = Depends(get_current_user)):
-    q = {"$or": [
-        {"from_id": current.id, "to_id": with_user},
-        {"from_id": with_user, "to_id": current.id},
-    ]}
-    msgs = await db.chat_dms.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
-    # Mark inbound as read
+    # Slice E: read from Postgres; dual-update read-marker (Mongo + PG).
+    msgs = await supa_data.get_dm_conversation(current.id, with_user)
     await db.chat_dms.update_many(
         {"to_id": current.id, "from_id": with_user, "read": False},
         {"$set": {"read": True}},
     )
+    await supa_data.mark_dm_read(current.id, with_user)
     return msgs
 
 
 @api.get("/chat/contacts")
 async def list_contacts(current: UserPublic = Depends(get_current_user)):
     """For admin: list all caregivers. For caregiver: list all admins."""
+    # Slice E: source from Postgres profiles
     target_role = "caregiver" if current.role == "admin" else "admin"
-    docs = await db.users.find(
-        {"role": target_role}, {"_id": 0, "hashed_password": 0}
-    ).to_list(500)
-    return docs
+    return await supa_data.list_users_by_role(target_role)
 
 
 # ---------- AUDIT BINDER PDF ----------
@@ -1536,14 +1509,16 @@ async def chat_with_assistant(req: ChatMessageReq,
                               current: UserPublic = Depends(get_current_user)):
     """Streaming SSE chat with Claude Sonnet 4.5."""
     # store user message
-    await db.chat_messages.insert_one({
+    user_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
         "user_id": current.id,
         "role": "user",
         "content": req.message,
         "created_at": now_iso(),
-    })
+    }
+    await db.chat_messages.insert_one(user_msg)
+    await supa_data.insert_chat_message(user_msg)
 
     async def event_gen():
         chat = LlmChat(
@@ -1563,14 +1538,16 @@ async def chat_with_assistant(req: ChatMessageReq,
             logger.error(f"LLM error: {e}")
             yield f"data: [Error: {str(e)}]\n\n"
         # persist assistant reply
-        await db.chat_messages.insert_one({
+        assistant_msg = {
             "id": str(uuid.uuid4()),
             "session_id": req.session_id,
             "user_id": current.id,
             "role": "assistant",
             "content": full_text,
             "created_at": now_iso(),
-        })
+        }
+        await db.chat_messages.insert_one(assistant_msg)
+        await supa_data.insert_chat_message(assistant_msg)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1582,10 +1559,8 @@ async def chat_with_assistant(req: ChatMessageReq,
 
 @api.get("/assistant/history/{session_id}")
 async def chat_history(session_id: str, current: UserPublic = Depends(get_current_user)):
-    docs = await db.chat_messages.find(
-        {"session_id": session_id, "user_id": current.id}, {"_id": 0}
-    ).sort("created_at", 1).to_list(500)
-    return docs
+    # Slice E: read from Postgres
+    return await supa_data.list_chat_messages(session_id, current.id)
 
 
 # ---------- HEALTH ----------
