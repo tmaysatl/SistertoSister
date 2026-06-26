@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 import os
 import io
+import asyncio
 import base64
 import logging
 from pydantic import BaseModel, Field, EmailStr
@@ -1528,27 +1529,34 @@ async def chat_with_assistant(req: ChatMessageReq,
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
         full_text = ""
         try:
-            async for ev in chat.stream_message(UserMessage(text=req.message)):
-                if isinstance(ev, TextDelta):
-                    full_text += ev.content
-                    yield f"data: {ev.content}\n\n"
-                elif isinstance(ev, StreamDone):
-                    break
-        except Exception as e:
-            logger.error(f"LLM error: {e}")
-            yield f"data: [Error: {str(e)}]\n\n"
-        # persist assistant reply
-        assistant_msg = {
-            "id": str(uuid.uuid4()),
-            "session_id": req.session_id,
-            "user_id": current.id,
-            "role": "assistant",
-            "content": full_text,
-            "created_at": now_iso(),
-        }
-        await db.chat_messages.insert_one(assistant_msg)
-        await supa_data.insert_chat_message(assistant_msg)
-        yield "data: [DONE]\n\n"
+            try:
+                async for ev in chat.stream_message(UserMessage(text=req.message)):
+                    if isinstance(ev, TextDelta):
+                        full_text += ev.content
+                        yield f"data: {ev.content}\n\n"
+                    elif isinstance(ev, StreamDone):
+                        break
+            except Exception as e:
+                logger.error(f"LLM error: {e}")
+                yield f"data: [Error: {str(e)}]\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            # Persist the assistant reply even if the client disconnects mid-stream,
+            # so /assistant/history is never left with an orphan user message.
+            if full_text:
+                assistant_msg = {
+                    "id": str(uuid.uuid4()),
+                    "session_id": req.session_id,
+                    "user_id": current.id,
+                    "role": "assistant",
+                    "content": full_text,
+                    "created_at": now_iso(),
+                }
+                try:
+                    await asyncio.shield(db.chat_messages.insert_one(assistant_msg))
+                    await asyncio.shield(supa_data.insert_chat_message(assistant_msg))
+                except Exception as persist_err:
+                    logger.warning(f"Assistant msg persist failed: {persist_err}")
 
     return StreamingResponse(
         event_gen(),
