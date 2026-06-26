@@ -615,9 +615,13 @@ async def create_document(req: DocumentCreate,
     obj = Document(**req.dict(), uploaded_by=current.id)
     await db.documents.insert_one(obj.dict())
     # Phase 4 Slice C: dual-write metadata + upload blob to Supabase Storage.
+    d_for_pg = obj.dict()
     if obj.file_base64:
-        supa_data.upload_document_blob_sync(obj.id, obj.file_base64, obj.mime_type or "application/pdf")
-    await supa_data.upsert_document(obj.dict())
+        path = supa_data.upload_document_blob_sync(
+            obj.id, obj.file_base64, obj.mime_type or "application/pdf"
+        )
+        d_for_pg["storage_path"] = path  # None if upload failed
+    await supa_data.upsert_document(d_for_pg)
     return obj
 
 
@@ -722,9 +726,10 @@ async def push_document(doc_id: str, req: DocumentPushReq,
         # Slice C: dual-write clone metadata. Re-upload blob under new id so
         # signed URLs are stable per recipient.
         if clone.get("file_base64"):
-            supa_data.upload_document_blob_sync(
+            path = supa_data.upload_document_blob_sync(
                 clone["id"], clone["file_base64"], clone.get("mime_type") or "application/pdf"
             )
+            clone["storage_path"] = path
         await supa_data.upsert_document(clone)
         created_ids.append(clone["id"])
     return {"created": len(created_ids), "ids": created_ids}
@@ -832,11 +837,13 @@ async def sign_document(
     )
     await db.documents.insert_one(signed.dict())
     # Slice C: dual-write the signed PDF
+    signed_dict = signed.dict()
     if signed.file_base64:
-        supa_data.upload_document_blob_sync(
+        path = supa_data.upload_document_blob_sync(
             signed.id, signed.file_base64, signed.mime_type or "application/pdf"
         )
-    await supa_data.upsert_document(signed.dict())
+        signed_dict["storage_path"] = path
+    await supa_data.upsert_document(signed_dict)
     await db.document_views.insert_one({
         "id": str(uuid.uuid4()),
         "document_id": doc_id,
@@ -958,9 +965,10 @@ async def submit_doc_form(doc_id: str, req: SubmitFormReq,
     await db.documents.insert_one(new_doc)
     # Slice C: dual-write filled-form document
     if new_doc.get("file_base64"):
-        supa_data.upload_document_blob_sync(
+        path = supa_data.upload_document_blob_sync(
             new_doc["id"], new_doc["file_base64"], "application/pdf"
         )
+        new_doc["storage_path"] = path
     await supa_data.upsert_document(new_doc)
     return {"id": new_doc["id"], "title": new_doc["title"]}
 

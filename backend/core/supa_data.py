@@ -370,18 +370,16 @@ def signed_url_for_document(storage_path: str, expires_in_seconds: int = 3600) -
         return None
 
 
-def lookup_storage_path_sync(doc_id: str, mime_type: str = "application/pdf") -> Optional[str]:
-    """Best-effort: produce the path we'd expect for a doc (no DB hit)."""
-    return _doc_storage_path(doc_id, mime_type)
-
-
 async def upsert_document(d: dict) -> bool:
-    """Insert/update document metadata in Postgres. `d` is the Document dict."""
+    """Insert/update document metadata in Postgres. `d` is the Document dict.
+
+    NOTE: callers are responsible for setting d['storage_path'] from the
+    return value of upload_document_blob_sync — we no longer synthesize a
+    path here, because doing so leaves PG with a phantom path if the Storage
+    upload actually failed.
+    """
     pool = await get_pg_pool()
-    storage_path = d.get("storage_path") or (
-        _doc_storage_path(d["id"], d.get("mime_type") or "application/pdf")
-        if d.get("file_base64") else None
-    )
+    storage_path = d.get("storage_path")
     meta = {k: d.get(k) for k in (
         "signature_image", "signed_at", "signed_by", "form_data",
         "public_url", "public_token", "watermark",
