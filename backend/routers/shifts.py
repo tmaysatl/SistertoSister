@@ -1,6 +1,9 @@
 """Shift scheduling endpoints + clock-in/out.
 
 Mounted under `/api` by server.py.
+
+Phase 4 Slice D — dual-write: every shift mutation writes to Mongo AND
+Supabase Postgres; GET /shifts reads from Postgres.
 """
 import logging
 from datetime import date as _date, timedelta
@@ -12,6 +15,7 @@ from pydantic import BaseModel
 from core.db import db
 from core.push import send_push
 from core.security import get_current_user, require_admin
+from core import supa_data
 from models import (
     Shift, ShiftCreate, ShiftUpdate, UserPublic, now_iso,
 )
@@ -72,10 +76,13 @@ async def create_shift(
             raise HTTPException(403, 'You are not assigned to this client.')
     parent = Shift(**req.dict(), created_by=current.id)
     await db.shifts.insert_one(parent.dict())
+    # Slice D: dual-write parent to Postgres
+    await supa_data.upsert_shift(parent.dict())
     if parent.kind == 'recurring':
         children = _expand_recurring(parent)
         if children:
             await db.shifts.insert_many([c.dict() for c in children])
+            await supa_data.upsert_shifts_bulk([c.dict() for c in children])
     if current.role == 'admin' and parent.caregiver_id != current.id:
         try:
             await send_push(
@@ -102,25 +109,19 @@ async def list_shifts(
     end: Optional[str] = None,
     current: UserPublic = Depends(get_current_user),
 ):
-    q: dict = {}
-    if client_id:
-        q['client_id'] = client_id
-    if caregiver_id:
-        q['caregiver_id'] = caregiver_id
+    # Slice D: read from Postgres (one_off only — recurring parents are not
+    # surfaced in the schedule view; they are expanded into one_off children).
+    effective_cg = caregiver_id
     if current.role == 'caregiver':
-        q['caregiver_id'] = current.id
-    q['$or'] = [{'kind': 'one_off'}, {'kind': {'$exists': False}}]
-    if start or end:
-        date_q: dict = {}
-        if start:
-            date_q['$gte'] = start
-        if end:
-            date_q['$lte'] = end
-        q['date'] = date_q
-    docs = (
-        await db.shifts.find(q, {'_id': 0}).sort('date', 1).to_list(1000)
+        effective_cg = current.id
+    rows = await supa_data.list_shifts_filtered(
+        caregiver_id=effective_cg,
+        client_id=client_id,
+        start=start,
+        end=end,
+        one_off_only=True,
     )
-    return [Shift(**d) for d in docs]
+    return [Shift(**r) for r in rows]
 
 
 @router.put('/shifts/{shift_id}', response_model=Shift)
@@ -145,6 +146,8 @@ async def update_shift(
         return Shift(**d)
     patch['updated_at'] = now_iso()
     await db.shifts.update_one({'id': shift_id}, {'$set': patch})
+    # Slice D: mirror patch to Postgres
+    await supa_data.update_shift_fields(shift_id, patch)
     d.update(patch)
     if is_admin and d.get('caregiver_id') and d['caregiver_id'] != current.id:
         try:
@@ -174,6 +177,8 @@ async def delete_shift(
     await db.shifts.delete_one({'id': shift_id})
     if d.get('kind') == 'recurring':
         await db.shifts.delete_many({'parent_shift_id': d['id']})
+    # Slice D: ON DELETE CASCADE handles children in Postgres
+    await supa_data.delete_shift(shift_id)
     if d.get('caregiver_id'):
         try:
             await send_push(
@@ -209,6 +214,7 @@ async def clock_in(
         'updated_at': now_iso(),
     }
     await db.shifts.update_one({'id': shift_id}, {'$set': update})
+    await supa_data.update_shift_fields(shift_id, update)
     d.update(update)
     return Shift(**d)
 
@@ -229,5 +235,6 @@ async def clock_out(
         'updated_at': now_iso(),
     }
     await db.shifts.update_one({'id': shift_id}, {'$set': update})
+    await supa_data.update_shift_fields(shift_id, update)
     d.update(update)
     return Shift(**d)

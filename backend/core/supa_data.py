@@ -433,3 +433,209 @@ async def get_document_storage_path(doc_id: str) -> Optional[str]:
         return await conn.fetchval(
             "select storage_path from public.documents where id=$1::uuid", doc_id
         )
+
+
+# ---------------------------------------------------------------------------
+# Shifts (Slice D)
+# ---------------------------------------------------------------------------
+
+def _date_or_none(v):
+    """Parse a YYYY-MM-DD string to a date; pass dates through; None stays None."""
+    if v is None:
+        return None
+    from datetime import date as _d
+    if isinstance(v, _d):
+        return v
+    if isinstance(v, str) and v:
+        try:
+            return _d.fromisoformat(v[:10])
+        except Exception:
+            return None
+    return None
+
+
+def _shift_clock_location(v) -> Optional[str]:
+    """The Mongo schema accepts an arbitrary string for clock_location.
+    Postgres stores JSONB, so wrap into a JSON value."""
+    if v is None:
+        return None
+    return json.dumps(v if isinstance(v, (dict, list)) else str(v))
+
+
+async def upsert_shift(s: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.shifts(id, caregiver_id, client_id, kind, date, weekdays,
+                                          recurring_until, parent_shift_id, start_time, end_time,
+                                          notes, service_type, status, clocked_in_at, clocked_out_at,
+                                          clock_location, created_by, created_at, updated_at)
+               values($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8::uuid, $9, $10,
+                      $11, $12, $13, $14, $15, $16::jsonb, $17::uuid,
+                      coalesce($18, now()), $19)
+               on conflict (id) do update set kind=excluded.kind,
+                                              date=excluded.date,
+                                              weekdays=excluded.weekdays,
+                                              recurring_until=excluded.recurring_until,
+                                              start_time=excluded.start_time,
+                                              end_time=excluded.end_time,
+                                              notes=excluded.notes,
+                                              service_type=excluded.service_type,
+                                              status=excluded.status,
+                                              clocked_in_at=excluded.clocked_in_at,
+                                              clocked_out_at=excluded.clocked_out_at,
+                                              clock_location=excluded.clock_location,
+                                              updated_at=excluded.updated_at""",
+            s['id'], s['caregiver_id'], s['client_id'],
+            s.get('kind') or 'one_off',
+            _date_or_none(s.get('date')),
+            s.get('weekdays'),
+            _date_or_none(s.get('recurring_until')),
+            s.get('parent_shift_id'),
+            s.get('start_time') or '', s.get('end_time') or '',
+            s.get('notes') or '', s.get('service_type') or '',
+            s.get('status') or 'scheduled',
+            _ts(s.get('clocked_in_at')),
+            _ts(s.get('clocked_out_at')),
+            _shift_clock_location(s.get('clock_location')),
+            s.get('created_by'),
+            _ts(s.get('created_at')),
+            _ts(s.get('updated_at')),
+        ), f"upsert_shift {s.get('id')}")
+
+
+async def upsert_shifts_bulk(shifts: list[dict]) -> int:
+    """Upsert many shifts in one transaction (for recurring children)."""
+    n = 0
+    for s in shifts:
+        if await upsert_shift(s):
+            n += 1
+    return n
+
+
+async def update_shift_fields(shift_id: str, patch: dict) -> bool:
+    """Apply a partial patch (only supported scalar fields)."""
+    if not patch:
+        return True
+    pool = await get_pg_pool()
+    allowed = {
+        'notes': 'text',
+        'service_type': 'text',
+        'status': 'text',
+        'start_time': 'text',
+        'end_time': 'text',
+        'date': 'date',
+        'clocked_in_at': 'timestamptz',
+        'clocked_out_at': 'timestamptz',
+        'clock_location': 'jsonb',
+        'updated_at': 'timestamptz',
+    }
+    sets = []
+    args: list = []
+    i = 2
+    for k, v in patch.items():
+        if k not in allowed:
+            continue
+        if allowed[k] == 'date':
+            v = _date_or_none(v)
+        elif allowed[k] == 'timestamptz':
+            v = _ts(v)
+        elif allowed[k] == 'jsonb':
+            v = _shift_clock_location(v)
+        sets.append(f"{k}=${i}")
+        args.append(v)
+        i += 1
+    if not sets:
+        return True
+    sql = f"update public.shifts set {', '.join(sets)} where id=$1::uuid"
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(sql, shift_id, *args),
+                           f"update_shift_fields {shift_id}")
+
+
+async def delete_shift(shift_id: str) -> bool:
+    """Delete a shift; ON DELETE CASCADE handles children of recurring parents."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "delete from public.shifts where id=$1::uuid",
+            shift_id,
+        ), f"delete_shift {shift_id}")
+
+
+async def list_shifts_filtered(
+    *,
+    caregiver_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    one_off_only: bool = True,
+) -> list[dict]:
+    pool = await get_pg_pool()
+    sql = [
+        "select id::text, caregiver_id::text, client_id::text, kind,",
+        "  to_char(date, 'YYYY-MM-DD') as date,",
+        "  weekdays,",
+        "  to_char(recurring_until, 'YYYY-MM-DD') as recurring_until,",
+        "  parent_shift_id::text,",
+        "  start_time, end_time, coalesce(notes,'') as notes,",
+        "  coalesce(service_type,'') as service_type, status,",
+        "  to_char(clocked_in_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"+00:00\"') as clocked_in_at,",
+        "  to_char(clocked_out_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"+00:00\"') as clocked_out_at,",
+        "  clock_location::text as clock_location,",
+        "  created_by::text,",
+        "  to_char(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"+00:00\"') as created_at,",
+        "  to_char(updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"+00:00\"') as updated_at",
+        "from public.shifts",
+    ]
+    where: list[str] = []
+    args: list = []
+    i = 1
+    if caregiver_id:
+        where.append(f"caregiver_id=${i}::uuid")
+        args.append(caregiver_id)
+        i += 1
+    if client_id:
+        where.append(f"client_id=${i}::uuid")
+        args.append(client_id)
+        i += 1
+    if start:
+        sd = _date_or_none(start)
+        if sd:
+            where.append(f"date >= ${i}")
+            args.append(sd)
+            i += 1
+    if end:
+        ed = _date_or_none(end)
+        if ed:
+            where.append(f"date <= ${i}")
+            args.append(ed)
+            i += 1
+    if one_off_only:
+        where.append("kind = 'one_off'")
+    if where:
+        sql.append("where " + " and ".join(where))
+    sql.append("order by date asc nulls last, start_time asc")
+    sql_text = "\n".join(sql)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql_text, *args)
+    out = []
+    for r in rows:
+        d = dict(r)
+        # clock_location came back as JSON text; convert to original shape
+        if d.get('clock_location'):
+            try:
+                d['clock_location'] = json.loads(d['clock_location'])
+            except Exception:
+                pass
+        out.append(d)
+    return out
+
+
+async def find_shift(shift_id: str) -> Optional[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "select id::text from public.shifts where id=$1::uuid", shift_id
+        )
+    return _row_to_dict(row)
