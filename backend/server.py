@@ -593,14 +593,19 @@ async def _build_audit_binder_bytes(client_id: Optional[str] = None,
 async def create_document(req: DocumentCreate,
                           current: UserPublic = Depends(get_current_user)):
     obj = Document(**req.dict(), uploaded_by=current.id)
-    await db.documents.insert_one(obj.dict())
-    # Phase 4 Slice C: dual-write metadata + upload blob to Supabase Storage.
-    d_for_pg = obj.dict()
+    # Phase 4 Slice C: upload blob to Supabase Storage FIRST so we can persist
+    # storage_path on the Mongo record (frontend uses this as the canonical
+    # "file is viewable" flag).
+    storage_path: Optional[str] = None
     if obj.file_base64:
-        path = supa_data.upload_document_blob_sync(
+        storage_path = supa_data.upload_document_blob_sync(
             obj.id, obj.file_base64, obj.mime_type or "application/pdf"
         )
-        d_for_pg["storage_path"] = path  # None if upload failed
+        obj.storage_path = storage_path
+    await db.documents.insert_one(obj.dict())
+    # Postgres mirror
+    d_for_pg = obj.dict()
+    d_for_pg["storage_path"] = storage_path
     await supa_data.upsert_document(d_for_pg)
     return obj
 

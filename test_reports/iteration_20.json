@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 20 — storage_path UI gating fix (Document Open/View eye-icon shown only when storage_path is set). BACKEND (pytest 6/6 in test_iteration20_storage_path_gating.py): (1) GET /api/documents returns EXACTLY 50 items with split 38 storage_path-set / 12 storage_path=null. (2) Pydantic Document model exposes storage_path on every list item. (3) POST /api/documents with a base64 tiny PDF returns 200 with storage_path='documents/<uuid>.pdf'. (4) GET /api/documents/{id}/url for the new doc returns 200 with url=https://... and storage_path matching create response. (5) DELETE cleans up both Mongo + Postgres. (6) Metadata-only doc (no storage_path) returns 404 with detail 'No stored file for this document' — intentional contract, NOT flagged. FRONTEND (Expo web, mobile 390x844): Login (admin@healthguard.com / AdminPassword123! Supabase mode default) -> Dashboard (1 Client / 12 Caregivers / 50 Documents). Documents tab opened; FlatList rendered 30 cards during scroll. Of those: 27 had data-testid='view-doc-<id>' eye-icon button rendered AND 3 did NOT — the 3 without buttons were the canonical metadata-only seed rows (TEST_caregiver_other, TEST_caregiver_own, TEST_training_doc), proving hasFile=!!(storage_path||file_base64) wires the gate correctly. Tapping the eye icon on a storage_path-set doc opens the appropriate viewer (PdfViewerModal for plain PDFs; FillableFormModal for the 5 fillable-by-title docs — both are valid). Tapping the card body of a no-file card does NOT open any modal (Pressable.onPress=undefined when hasFile=false). Upload-without-file: + button -> title 'phase7_ui_smoke' -> category 'credential' -> Save returned a new card with NO view-doc-<id> button. Cleaned up via delete-doc-<id>.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration20_storage_path_gating.py",
+    "/app/test_reports/pytest/iteration20_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "frontend/app/(tabs)/documents.tsx:328 — `const hasFile = !!(item.storage_path || item.file_base64);` is the single source of truth for the gate. Both the eye-icon visibility (line 371) AND the card-tap onPress (line 335) read from `hasFile`, so the contract is enforced consistently. The file_base64 OR-fallback is the intentional defensive fallback for any pre-cutover legacy doc.",
+    "backend/models.py:98 — Document gained `storage_path: Optional[str] = None`. This is exposed by the list/get endpoints automatically because the response model is the same Document type. No router changes were needed beyond the create path.",
+    "Phase 4 backend contract: GET /api/documents/{id}/url returning 404 'No stored file for this document' for the 12 metadata-only seed rows is the correct response; the UI fix now ensures users never see an affordance that would trigger that 404."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration20_storage_path_gating.py (new — 6 pytest cases)",
+    "/app/test_result.md (frontend.tasks[storage_path gating] working=true, needs_retesting=false)"
+  ],
+  "success_rate": {
+    "backend": "100% (6/6 pytest): 50 docs total, exact 38/12 split, upload sets storage_path, signed URL returns matching path, metadata-only docs return intentional 404.",
+    "frontend": "100% — eye-icon view-doc-<id> rendered ONLY on cards with storage_path (27/30 visible cards); 3 no-file cards (TEST_caregiver_other/own/training_doc) had no eye-icon; tapping their card body did NOT open any viewer; tapping eye-icon on storage_path doc opened the appropriate viewer; metadata-only upload appeared in list without eye-icon."
+  },
+  "seed_data_creation": "Created one TEST_iter20 doc via POST /api/documents (immediately deleted in the same suite); created one UI smoke doc 'phase7_ui_smoke' (deleted in the same test). No residue.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "storage_path gating is GREEN. Backend exact counts: 50 documents total, 38 with non-null storage_path, 12 metadata-only (storage_path=null). The 3 named no-file seed docs are TEST_caregiver_other, TEST_caregiver_own, TEST_training_doc (also '02 - HIPAA Privacy Policy', '03 - Bloodborne Pathogens & Infection Control', plus the 12 onboarding policy-style docs). The single source of truth in the UI is `hasFile = !!(item.storage_path || item.file_base64)` at documents.tsx:328 — both the eye-icon visibility AND the card-onPress are gated on it. Note for future testers: tapping the eye-icon on the first card '01 - Employment Application' opens FillableFormModal (NOT PdfViewerModal) because that title is in the FILLABLE_TITLES set at documents.tsx:76-82 — this is correct behavior. Use a title not in FILLABLE_TITLES to test the PdfViewerModal specifically. FlatList virtualization limits the number of cards rendered at once on web (we saw 30/50 during scroll) — this is normal Expo FlatList behavior; the gating contract is invariant so the partial sample is sufficient.",
+  "rca_of_issue": "No bugs found. The storage_path gating fix is correct and complete. The user's intentional 404 contract on /api/documents/{id}/url for metadata-only docs is preserved unchanged; the UI no longer offers an affordance that would trigger it."
+}

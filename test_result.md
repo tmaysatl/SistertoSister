@@ -125,6 +125,74 @@ backend:
           for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
 
 frontend:
+  - task: "Documents UI — gate Open/View button on storage_path (not file_base64)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/documents.tsx, /app/backend/models.py, /app/backend/server.py, /app/scripts/_backfill_storage_path.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Iteration 20 verified GREEN end-to-end.
+          BACKEND (pytest 6/6 in test_iteration20_storage_path_gating.py):
+            - GET /api/documents returns 50 docs; exact split 38 with non-null
+              storage_path / 12 with storage_path=null. The `storage_path` key
+              is present on every record (Pydantic Document model exposes it).
+            - POST /api/documents with a small base64 PDF returns 200 with
+              storage_path='documents/<uuid>.pdf' set on the create response;
+              GET /api/documents/{id}/url then returns 200 with url=https://...
+              and storage_path matching exactly. DELETE cleans up both stores.
+            - Metadata-only doc GET /api/documents/{id}/url returns 404 with
+              detail 'No stored file for this document' (intentional contract,
+              not flagged as a bug per the review request).
+          FRONTEND (Expo web, mobile 390x844, Supabase admin login):
+            - Documents tab header reads "50 items".
+            - Of 30 cards rendered by FlatList virtualization, 27 carried
+              data-testid="view-doc-<id>" and 3 did NOT. The 3 without a view
+              button were exactly the seed docs whose storage_path is null
+              (TEST_caregiver_other, TEST_caregiver_own, TEST_training_doc) —
+              confirming the gate `hasFile = !!(item.storage_path || item.file_base64)`
+              wires the eye-icon visibility correctly.
+            - Tapping the eye-icon on a doc WITH storage_path opens the
+              appropriate viewer (PdfViewerModal for plain PDFs, FillableFormModal
+              for the 5 fillable-by-title docs — both are valid "open" actions).
+            - Tapping the card body of a doc WITHOUT storage_path does NOT
+              open any modal (Pressable.onPress is undefined when hasFile is
+              false). Verified with TEST_caregiver_other.
+            - Upload flow: tapping + button (testID=add-document-button),
+              entering title "phase7_ui_smoke" with category "credential" and
+              NO file picked, then tapping Save -> the new doc appears in the
+              list with NO view-doc button (hasView=false), matching the
+              gating contract. Cleanup via delete-doc-<id> succeeded.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Followup to Phase 6 testing finding about 12 seed docs returning 404 on
+          /api/documents/{id}/url. The user explicitly asked to (a) hide the
+          Open/View affordance when storage_path is missing, (b) confirm real
+          uploads persist a valid storage_path and open correctly.
+          Changes:
+          1. models.Document gained `storage_path: Optional[str] = None`, so
+             /api/documents (list) and /api/documents/{id} (get) now include it.
+          2. create_document now uploads to Supabase Storage BEFORE inserting
+             into Mongo, then persists storage_path on BOTH Mongo and Postgres
+             rows — so the frontend immediately sees the new field.
+          3. New backfill script `/app/scripts/_backfill_storage_path.py`
+             walked all 50 docs: 38 had file_base64 with no storage_path → all
+             uploaded to Storage and patched on both stores. 12 docs are
+             metadata-only (no blob) and intentionally remain without
+             storage_path.
+          4. documents.tsx now computes `hasFile = !!(item.storage_path || item.file_base64)`
+             — storage_path is the canonical "viewable" flag; file_base64 is a
+             defensive fallback for legacy docs not yet backfilled.
+          Backend behavior for /documents/{id}/url is UNCHANGED (still 404 when
+          no blob in Storage). Verified via standalone smoke: real upload sets
+          storage_path, /url returns signed URL, /stamped serves PDF, DELETE
+          removes both stores.
+
   - task: "Phase 6 — Frontend Supabase JWT cutover with legacy fallback"
     implemented: true
     working: "NA"
@@ -157,13 +225,50 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Phase 6 — Frontend Supabase JWT cutover with legacy fallback"
-    - "Phase 5 Slice J — MS Graph integrations dual-write (Mongo + Postgres)"
+    - "Documents UI — gate Open/View button on storage_path (not file_base64)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "main"
+    message: |
+      UI/DATA FIX: Documents tab now only shows the Open/View button when the
+      document has a storage_path (canonical Supabase Storage flag).
+      Real uploads via POST /api/documents persist storage_path on BOTH Mongo
+      and Postgres immediately. Backfilled 38 pre-existing seed docs that had
+      file_base64 but no storage_path. The 12 metadata-only docs (HIPAA
+      Privacy Policy etc., no actual PDF) intentionally show no Open button.
+
+      PLEASE VERIFY (frontend only, on Expo web at /):
+      1. Log in (Supabase default mode) as admin@healthguard.com / AdminPassword123!
+      2. Open the Documents tab.
+      3. Confirm:
+         a. Seed docs WITH a backfilled PDF (e.g. titles like
+            "Client Authorization Form", "Background Check", "TB Test", etc.)
+            show a green doc-attach icon AND the eye-icon "view" button
+            (testID `view-doc-<id>`).
+         b. The 12 metadata-only docs (titles like "02 - HIPAA Privacy
+            Policy", "03 - Bloodborne Pathogens & Infection Control",
+            "TEST_caregiver_other", etc.) DO NOT show the view button — only
+            the title/category row + delete icon. Tapping the card itself
+            should be a no-op (Pressable onPress is undefined when !hasFile).
+         c. Tapping the view button on a doc WITH storage_path opens
+            PdfViewerModal and renders the stamped PDF.
+         d. Upload a fresh PDF via the + button: the new doc should appear in
+            the list AND show the view button immediately (no refresh needed).
+            Tap to open — modal should display the PDF.
+      Backend test (optional sanity):
+      - GET /api/documents returns storage_path on each item (38 set, 12 null).
+      - POST /api/documents with file_base64 returns storage_path in response.
+      - GET /api/documents/{id}/url returns signed URL for docs with
+        storage_path; returns 404 for the 12 metadata-only docs (this is
+        intentional per backend contract).
+
+      Credentials reminder:
+        Supabase: admin@healthguard.com / AdminPassword123!
+        Legacy:   admin@healthguard.com / Admin@123
+
   - agent: "main"
     message: |
       Phase 5 Slice J + Phase 6 complete.

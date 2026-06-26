@@ -25,6 +25,7 @@ type DocItem = {
   notes?: string;
   uploaded_at: string;
   file_base64?: string | null;
+  storage_path?: string | null;
   mime_type?: string;
   expires_at?: string | null;
   seq?: number | null;
@@ -321,7 +322,10 @@ export default function Documents() {
           const expSoon =
             expiry && expiry.getTime() - Date.now() < 60 * 24 * 60 * 60 * 1000;
           const expired = expiry && expiry.getTime() < Date.now();
-          const hasFile = !!item.file_base64;
+          // Phase 6: storage_path is the canonical "viewable" flag.
+          // file_base64 is kept as a legacy fallback for docs that pre-date the
+          // Supabase Storage cutover (after backfill this should be empty set).
+          const hasFile = !!(item.storage_path || item.file_base64);
           const open = () => {
             if (isFillable(item)) { setFormDoc(item); return; }
             if (hasFile) setViewerDoc(item);

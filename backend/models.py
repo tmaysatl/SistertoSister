@@ -93,6 +93,9 @@ class Document(BaseModel):
     expires_at: Optional[str] = None
     seq: Optional[int] = None
     is_template: bool = False
+    # Phase 4 Slice C: pointer to Supabase Storage object. Frontend uses this
+    # as the canonical "file is viewable" flag (set after a successful upload).
+    storage_path: Optional[str] = None
 
 
 class DocumentCreate(BaseModel):
