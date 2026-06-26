@@ -505,12 +505,52 @@ async def upsert_shift(s: dict) -> bool:
 
 
 async def upsert_shifts_bulk(shifts: list[dict]) -> int:
-    """Upsert many shifts in one transaction (for recurring children)."""
-    n = 0
+    """Upsert many shifts using one connection + executemany (single round-trip
+    batch). Used for recurring child shifts which can be hundreds of rows for
+    a year-long schedule."""
+    if not shifts:
+        return 0
+    pool = await get_pg_pool()
+    rows = []
     for s in shifts:
-        if await upsert_shift(s):
-            n += 1
-    return n
+        rows.append((
+            s['id'], s['caregiver_id'], s['client_id'],
+            s.get('kind') or 'one_off',
+            _date_or_none(s.get('date')),
+            s.get('weekdays'),
+            _date_or_none(s.get('recurring_until')),
+            s.get('parent_shift_id'),
+            s.get('start_time') or '', s.get('end_time') or '',
+            s.get('notes') or '', s.get('service_type') or '',
+            s.get('status') or 'scheduled',
+            _ts(s.get('clocked_in_at')),
+            _ts(s.get('clocked_out_at')),
+            _shift_clock_location(s.get('clock_location')),
+            s.get('created_by'),
+            _ts(s.get('created_at')),
+            _ts(s.get('updated_at')),
+        ))
+    sql = """insert into public.shifts(id, caregiver_id, client_id, kind, date, weekdays,
+                                       recurring_until, parent_shift_id, start_time, end_time,
+                                       notes, service_type, status, clocked_in_at, clocked_out_at,
+                                       clock_location, created_by, created_at, updated_at)
+             values($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8::uuid, $9, $10,
+                    $11, $12, $13, $14, $15, $16::jsonb, $17::uuid,
+                    coalesce($18, now()), $19)
+             on conflict (id) do update set status=excluded.status,
+                                            updated_at=excluded.updated_at"""
+    try:
+        async with pool.acquire() as conn:
+            await conn.executemany(sql, rows)
+        return len(rows)
+    except Exception as e:
+        log.warning("[supa-write] upsert_shifts_bulk(%d) failed: %s", len(rows), str(e)[:200])
+        # Fall back to per-row upsert so we don't lose all children if one is bad
+        n = 0
+        for s in shifts:
+            if await upsert_shift(s):
+                n += 1
+        return n
 
 
 async def update_shift_fields(shift_id: str, patch: dict) -> bool:
