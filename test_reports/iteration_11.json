@@ -1,0 +1,37 @@
+{
+  "summary": "Phase 4 Slice B (dual-write cutover) verified GREEN end-to-end. Backend pytest: 23/23 PASS (test_iteration11_phase4b_dual_write.py). All 9 mutating routes now write to BOTH MongoDB and Supabase Postgres (Mongo authoritative, Postgres best-effort): POST /api/clients, DELETE /api/clients/{id}, PUT /api/clients/{id}/photo, PUT /api/users/{id}/photo, POST /api/assignments (idempotent on caregiver+client pair), DELETE /api/assignments/{id}, POST /api/clients/{id}/bulk-assign-onboarding, POST /api/client-tasks/{id}/toggle. GET /api/assignments now reads from Postgres and surfaces newly-created rows. Direct SUPABASE_DIRECT_URL probes confirm dual-write parity: created clients/assignments appear immediately in Postgres; deletes cascade automatically via ON DELETE CASCADE (verified by creating a client+assignment, deleting the client, and seeing the assignment disappear from Postgres without an explicit delete). Photo updates flush to both DBs (data: URI prefix stripped consistently). Idempotency: posting the same (caregiver_id, client_id) twice returns the same assignment id; Postgres row-count remains 1 for that pair. Toggle flips `completed` and `completed_at` symmetrically in both stores. Slice A regression: /api/auth/me, /api/caregivers, /api/clients, /api/stats all work under BOTH legacy HS256 (Admin@123) and Supabase ES256 (AdminPassword123!) JWTs. Non-Phase-4 routes (/api/documents=50, /api/onboarding, /api/shifts, /api/training) still serve Mongo. Frontend (Expo web preview, mobile viewport 390x844): legacy and Supabase logins both land on Dashboard showing 1 Client / 12 Caregivers / 50 Documents / 0 Trainings; Team tab loads Clients/Caregivers/Onboarding sub-tabs; Schedule tab shows Day/Week toggle. End-to-end UI flow created a 'TEST_PH4B_UI_Client', verified it appeared in the Clients list, deleted it via the delete-client-<uuid> button, and confirmed it was removed from BOTH Mongo (gone from UI list) and Postgres (direct asyncpg probe returned None). Final cleanup parity: PG clients=1, assignments=2, client_tasks=13 — exactly matches the Phase 3 baseline, zero drift.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_phase4b_dual_write.py",
+    "/app/test_reports/pytest/iteration11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:104-106 — Mongo insert happens before Postgres upsert (correct), but if the Postgres write logs a WARNING the route still returns 200 with no signal to the caller. Once Slice J flips authority to Postgres this best-effort behaviour will need a deprecation plan, otherwise silent drift could accumulate. Recommend adding a Prometheus counter (or at minimum a periodic reconcile job) for `supa_data._safe` failures so the team can see when dual-write divergence happens in prod.",
+    "server.py:1100-1111 — Idempotency on POST /api/assignments is checked against Mongo only (db.assignments.find_one). If a row exists in Postgres but not Mongo (drift), the route would happily create a new Mongo row and try to upsert against the existing Postgres id — but it would generate a fresh uuid, so the conflict would create a second Postgres row. Today this can't happen because Mongo is always written first, but worth tightening once Postgres becomes authoritative.",
+    "core/supa_data.py:142-148 — _safe swallows EVERY exception including programmer errors (e.g., a typo in SQL, asyncpg.InterfaceError on pool exhaustion). Consider letting asyncpg.PostgresSyntaxError / TypeError bubble up so dev-time regressions are caught loudly, while still catching ConnectionDoesNotExistError / DataError-style runtime issues.",
+    "server.py /api/users/{id}/photo (line 198-206) — splits data URI with `.split(',', 1)[-1]` which is fine, but does not validate the input is actually base64. A malformed photo_base64 like 'not-base64' would persist as-is into both DBs.",
+    "Reload watcher still includes /app/backend/tests/ — backend reloads when test files are edited (already noted in iteration_10, still present in iteration_11)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration11_phase4b_dual_write.py (new — 23 pytest cases covering Slice B dual-write, idempotency, cascade, Slice A regression, Mongo regression, and Mongo↔Postgres parity)"
+  ],
+  "success_rate": {
+    "backend": "100% (23/23 pytest cases)",
+    "frontend": "100% (legacy + supabase login -> dashboard, Team, Schedule, UI create-then-delete client end-to-end, Postgres parity confirmed)"
+  },
+  "seed_data_creation": "Tests create their own TEST_PH4B_* clients/assignments/tasks and clean up via the module-level autouse fixture. No persistent state left behind: final PG counts (clients=1, assignments=2, client_tasks=13) exactly equal the Phase 3 baseline.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 4 Slice B is GREEN. All 9 mutating routes dual-write Mongo+Postgres with Mongo authoritative. GET /api/assignments now reads from Postgres. Reusable fixtures in test_iteration11_phase4b_dual_write.py: admin_token (legacy HS256), supabase_token (ES256 from /auth/v1/token), helpers _pg_run/pg_get_client/pg_get_assignment/pg_get_photo/pg_get_task/pg_count via SUPABASE_DIRECT_URL with statement_cache_size=0. Login testIDs are `login-email-input`, `login-password-input`, `login-submit-button`, `auth-mode-toggle`. Team-screen UI testIDs: `team-add-button`, `client-name-input`, `submit-client-button`, `client-<uuid>`, `delete-client-<uuid>`, `bulk-assign-client-<uuid>`, `team-tab-clients`. Bottom-nav tabs are reachable via `page.get_by_text('Team'|'Schedule'|'Documents'|'Policies', exact=True)` (no testIDs on the tab bar — could be improved). Next slice (presumably C) should convert another set of write paths (documents? shifts? onboarding?) to dual-write or flip /api/assignments to be Mongo-best-effort + Postgres-authoritative.",
+  "rca_of_issue": "N/A — no failures."
+}
