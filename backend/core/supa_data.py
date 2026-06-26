@@ -802,3 +802,74 @@ async def list_chat_messages(session_id: str, user_id: str) -> list[dict]:
             session_id, user_id,
         )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Onboarding (Slice F)
+# ---------------------------------------------------------------------------
+
+async def upsert_onboarding_step(s: dict) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            """insert into public.onboarding(id, caregiver_id, title, description,
+                                              completed, completed_at, created_at)
+               values($1::uuid, $2::uuid, $3, $4, $5, $6, coalesce($7, now()))
+               on conflict (id) do update set title=excluded.title,
+                                              description=excluded.description,
+                                              completed=excluded.completed,
+                                              completed_at=excluded.completed_at""",
+            s['id'], s['caregiver_id'], s.get('title') or '',
+            s.get('description') or '',
+            bool(s.get('completed', False)),
+            _ts(s.get('completed_at')),
+            _ts(s.get('created_at')),
+        ), f"upsert_onboarding_step {s.get('id')}")
+
+
+async def toggle_onboarding_step(step_id: str, completed: bool,
+                                 completed_at: Optional[str]) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "update public.onboarding set completed=$2, completed_at=$3 "
+            "where id=$1::uuid",
+            step_id, completed, _ts(completed_at),
+        ), f"toggle_onboarding_step {step_id}")
+
+
+async def delete_onboarding_step(step_id: str) -> bool:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        return await _safe(conn.execute(
+            "delete from public.onboarding where id=$1::uuid",
+            step_id,
+        ), f"delete_onboarding_step {step_id}")
+
+
+async def list_onboarding_steps(caregiver_id: Optional[str] = None) -> list[dict]:
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        if caregiver_id:
+            rows = await conn.fetch(
+                """select id::text, caregiver_id::text, title,
+                          coalesce(description,'') as description,
+                          completed,
+                          to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as completed_at,
+                          to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at
+                   from public.onboarding
+                   where caregiver_id=$1::uuid
+                   order by created_at asc""",
+                caregiver_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """select id::text, caregiver_id::text, title,
+                          coalesce(description,'') as description,
+                          completed,
+                          to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as completed_at,
+                          to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"+00:00"') as created_at
+                   from public.onboarding
+                   order by created_at asc"""
+            )
+    return [dict(r) for r in rows]

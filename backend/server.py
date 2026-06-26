@@ -1215,6 +1215,8 @@ async def create_step(req: OnboardingStepCreate,
                       _: UserPublic = Depends(require_admin)):
     obj = OnboardingStep(**req.dict())
     await db.onboarding.insert_one(obj.dict())
+    # Slice F: dual-write
+    await supa_data.upsert_onboarding_step(obj.dict())
     return obj
 
 
@@ -1223,13 +1225,10 @@ async def list_steps(
     caregiver_id: Optional[str] = None,
     current: UserPublic = Depends(get_current_user),
 ):
-    q = {}
-    if current.role == "caregiver":
-        q["caregiver_id"] = current.id
-    elif caregiver_id:
-        q["caregiver_id"] = caregiver_id
-    docs = await db.onboarding.find(q, {"_id": 0}).to_list(500)
-    return [OnboardingStep(**d) for d in docs]
+    # Slice F: read from Postgres
+    cg = current.id if current.role == "caregiver" else caregiver_id
+    rows = await supa_data.list_onboarding_steps(caregiver_id=cg)
+    return [OnboardingStep(**r) for r in rows]
 
 
 @api.post("/onboarding/{step_id}/toggle", response_model=OnboardingStep)
@@ -1240,11 +1239,11 @@ async def toggle_step(step_id: str, current: UserPublic = Depends(get_current_us
     if current.role == "caregiver" and d["caregiver_id"] != current.id:
         raise HTTPException(403, "Not your step")
     new_completed = not d.get("completed", False)
-    update = {
-        "completed": new_completed,
-        "completed_at": now_iso() if new_completed else None,
-    }
+    completed_at = now_iso() if new_completed else None
+    update = {"completed": new_completed, "completed_at": completed_at}
     await db.onboarding.update_one({"id": step_id}, {"$set": update})
+    # Slice F: dual-write
+    await supa_data.toggle_onboarding_step(step_id, new_completed, completed_at)
     d.update(update)
     return OnboardingStep(**d)
 
@@ -1252,6 +1251,8 @@ async def toggle_step(step_id: str, current: UserPublic = Depends(get_current_us
 @api.delete("/onboarding/{step_id}")
 async def delete_step(step_id: str, _: UserPublic = Depends(require_admin)):
     await db.onboarding.delete_one({"id": step_id})
+    # Slice F: dual-delete
+    await supa_data.delete_onboarding_step(step_id)
     return {"ok": True}
 
 
@@ -1288,6 +1289,8 @@ async def bulk_assign_onboarding(req: BulkAssignReq,
             description=f"Review and sign: {d['title']}",
         )
         await db.onboarding.insert_one(step.dict())
+        # Slice F: dual-write
+        await supa_data.upsert_onboarding_step(step.dict())
         created += 1
     return {"created": created, "total_steps": len(docs)}
 
