@@ -1,0 +1,29 @@
+{
+  "summary": "Phase 3 (MongoDB -> Supabase data COPY) verified end-to-end. Backend: 28/28 pytest cases passed against the public ingress. /api/supabase/status returns enabled=true, db=ok, tables>=15, profiles=13, storage_buckets contains 'documents'. Legacy /api/auth/login (admin@healthguard.com / Admin@123) still issues a working HS256 token and /api/stats returns counters {clients:1, caregivers:12, documents:50, training:0}. Supabase password-grant token (admin@healthguard.com / AdminPassword123!) authorises /api/stats|/clients|/caregivers|/documents and the Supabase Auth user.id is exactly 8f16fe69-b54e-421a-bfe5-e14900e7bacd (Mongo UUID preserved). /api/supabase/me returns merged Mongo UserPublic + Postgres profile row with the same UUID and role=admin. Direct Supabase Postgres counts (asyncpg via SUPABASE_DIRECT_URL) match expectations exactly: profiles=13, clients=1, documents=50, assignments=2, shifts=3, chat_messages=24, chat_dms=2, client_tasks=13, onboarding=52. UUID alignment: the 13 user UUIDs in Mongo's users collection equal the 13 profile UUIDs in Supabase Postgres (no missing, no extras, no email mismatches). Frontend (mobile viewport 390x844): login page renders with 'Auth: Supabase · tap to switch' pill, Supabase login lands on '/' with dashboard showing AUDIT READINESS 50%, OVERVIEW counters 1/12/50/0 and 'Onboarding tasks 52 steps pending'. Documents tab shows 'Document Vault · 50 items' with category filters. Team tab loads with Clients/Caregivers/Onboarding sub-tabs and the 1 client visible. Schedule tab loads (header 'Schedule · Friday, June 26, 2026', Day/Week toggle, 'New shift' button) — the 3 migrated shifts exist on other dates so today shows 'No shifts scheduled', which is correct day-view behavior. Logout button redirects to /login. No bugs found in Phase 3 copy.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_phase3_data_migration.py",
+    "/app/test_reports/pytest/iteration9_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "supabase_router.py /supabase/status still swallows storage errors into 'storage_error' and returns 200. Not a Phase 3 regression but worth surfacing in admin UI as a soft warning when storage_buckets is missing.",
+    "core/security.py lazy-creates a Mongo shadow user for Supabase JWTs whose email is not in Mongo (empty hashed_password). Now that Mongo and Supabase emails are aligned 1:1 (13/13), drift risk in Phase 4 cutover is low but the lazy-create code path should be removed once Supabase becomes source of truth.",
+    "_migrate_data.py / supabase_schema_phase3.sql / _verify_migration.py are migration artefacts checked into /app/backend. They are not imported by server.py but they DO trigger uvicorn --reload (see backend.err.log 'WatchFiles detected changes in _verify_migration.py'). Recommend moving them to /app/scripts/ or adding to reload-exclude before Phase 4."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration9_phase3_data_migration.py (new)"
+  ],
+  "success_rate": { "backend": "100%", "frontend": "100%" },
+  "seed_data_creation": "None. Tests are read-only against migrated Mongo + Supabase snapshots. The TEST_caregiver_other / TEST_caregiver_own / TEST_training_doc rows visible in the Document Vault are stale fixtures from an earlier iteration (not Phase 3).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 3 (copy-only) is GREEN. For Phase 4 (cutover to Postgres for runtime reads/writes), the new pytest module /app/backend/tests/test_iteration9_phase3_data_migration.py exercises: Supabase status, dual-mode auth, Mongo-via-API counts, direct Postgres counts via asyncpg + SUPABASE_DIRECT_URL, and Mongo<->Postgres UUID alignment. Reuse the supabase_login / supabase_token fixtures. EXPO_PUBLIC_BACKEND_URL is the public ingress; Postgres is read via asyncpg with statement_cache_size=0 (transaction-mode pooler requirement). UUID 8f16fe69-b54e-421a-bfe5-e14900e7bacd is the canonical admin UUID in BOTH stores after Phase 3. Schedule shows 3 shifts in DB but the Day view on the test date (Jun 26 2026) shows 'No shifts scheduled' — switch to Week view or navigate dates to see them.",
+  "rca_of_issue": "N/A - no failures encountered. All Phase 3 acceptance criteria met."
+}
