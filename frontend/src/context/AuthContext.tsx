@@ -48,6 +48,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setModeState(effectiveMode);
 
         if (effectiveMode === "supabase" && SUPABASE_CONFIGURED) {
+          // Show cached user immediately for snappy cold-start UX
+          try {
+            const cached = await AsyncStorage.getItem("sbUserInfo");
+            if (cached) setUser(JSON.parse(cached));
+          } catch { /* ignore */ }
+
           const { data } = await supabase.auth.getSession();
           const session = data.session;
           if (session?.access_token) {
@@ -60,8 +66,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               if (res.ok) {
                 const body = await res.json();
                 setUser(body.user as User);
+                await AsyncStorage.setItem("sbUserInfo", JSON.stringify(body.user));
               }
             } catch { /* ignore */ }
+          } else {
+            // No session but cached user from a prior login — drop it
+            setUser(null);
+            await AsyncStorage.removeItem("sbUserInfo");
           }
         } else {
           const t = await AsyncStorage.getItem("userToken");
@@ -127,6 +138,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     const body = await res.json();
     setUser(body.user as User);
+    try { await AsyncStorage.setItem("sbUserInfo", JSON.stringify(body.user)); } catch { /* ignore */ }
   };
 
   const loginLegacy = async (email: string, password: string) => {
@@ -179,10 +191,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    if (mode === "supabase" && SUPABASE_CONFIGURED) {
+    // Phase 6: always sign out of Supabase to avoid stale sessions when users
+    // switch between modes. Safe to call even when no session exists.
+    if (SUPABASE_CONFIGURED) {
       try { await supabase.auth.signOut(); } catch { /* ignore */ }
     }
-    await AsyncStorage.multiRemove(["userToken", "userInfo"]);
+    await AsyncStorage.multiRemove(["userToken", "userInfo", "sbUserInfo"]);
     setToken(null);
     setUser(null);
   };

@@ -119,16 +119,35 @@ backend:
       - working: true
         agent: "main"
         comment: |
-          Added supa_data.upsert_integration_tokens / get_integration / delete_integration
-          helpers (JSONB merge on conflict, never raises). Modified _ms_save_tokens,
-          ms_disconnect, and ms_email_recipients in routers/ms_graph.py to dual-write
-          to the Postgres public.integrations table (provider='microsoft_graph').
-          Mongo (db.integrations) remains the read source for /api/ms/status until
-          Phase 6 frontend cutover. Note: /api/register-push only relays to the
-          Emergent push service — no local DB writes, so nothing to migrate there.
-          Smoke test _smoke_slice_j.py PASSES end-to-end (email-recipients, refresh
-          token merge, disconnect cascade). All previous slices A–I smoke tests
-          still PASS (no regressions).
+          Slice J complete. /api/ms/email-recipients, /api/ms/disconnect, and
+          internal _ms_save_tokens dual-write to public.integrations
+          (provider='microsoft_graph'). Mongo db.integrations still authoritative
+          for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
+
+frontend:
+  - task: "Phase 6 — Frontend Supabase JWT cutover with legacy fallback"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/context/AuthContext.tsx, /app/frontend/src/api/client.ts, /app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          AuthContext now defaults to Supabase mode when SUPABASE_CONFIGURED is true
+          (always true in this env). api/client.ts already prefers Supabase JWT and
+          falls back to legacy token only when no Supabase session.
+          Phase 6 hardening:
+          1. Cached user (sbUserInfo) in AsyncStorage for snappy cold-start in
+             Supabase mode (avoids blank screen while /supabase/me round-trips).
+          2. Logout now ALWAYS signs out of Supabase + clears all cached tokens
+             regardless of current mode (prevents stale sessions when toggling).
+          3. The "Auth mode" toggle pill on the login screen remains visible so
+             users can fall back to Legacy (MongoDB) JWT if Supabase has an outage.
+          Backend already accepts both Supabase ES256 JWT (via JWKS) and legacy
+          HS256 custom JWT in parallel (Phase 2). MS Graph integration unchanged.
 
 metadata:
   created_by: "main_agent"
@@ -138,6 +157,7 @@ metadata:
 
 test_plan:
   current_focus:
+    - "Phase 6 — Frontend Supabase JWT cutover with legacy fallback"
     - "Phase 5 Slice J — MS Graph integrations dual-write (Mongo + Postgres)"
   stuck_tasks: []
   test_all: false
@@ -146,8 +166,31 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Slice J complete. MS Graph /api/ms/* endpoints now dual-write the
-      `integrations` table to both MongoDB and Supabase Postgres.
-      Push tokens require no migration (relayed to Emergent, not persisted).
-      Please run a backend regression on /api/ms/status, /api/ms/email-recipients,
-      and /api/ms/disconnect, plus a quick auth+stats smoke from the frontend.
+      Phase 5 Slice J + Phase 6 complete.
+      - Slice J: MS Graph /api/ms/* dual-writes to Postgres public.integrations.
+      - Phase 6: Frontend now defaults to Supabase JWT. Legacy JWT login is still
+        reachable via the toggle pill (testID="auth-mode-toggle") on the login
+        screen so users can fall back if Supabase has an outage.
+      Backend still accepts both auth modes (dual-mode auth from Phase 2).
+      Please run a COMPREHENSIVE backend + frontend regression covering:
+        Backend:
+          • /api/auth/login + /api/auth/me (legacy + Supabase JWT)
+          • /api/supabase/me bridge
+          • /api/clients CRUD, /api/caregivers, /api/assignments
+          • /api/documents (upload + signed URL via /api/documents/{id}/url)
+          • /api/chat/threads + /api/chat/messages
+          • /api/policies/acknowledge + /api/training + completions
+          • /api/onboarding
+          • /api/packets/share + /api/packets/{token}/sign/{doc_id}
+          • /api/ms/email-recipients + /api/ms/disconnect (dual-write to PG)
+        Frontend:
+          • Default login flow uses Supabase mode and lands on /(tabs)
+          • Login mode toggle pill switches to Legacy and authenticates with
+            admin@healthguard.com / Admin@123
+          • After login: tabs render, clients list loads, chat threads load,
+            training and policies render, packet share screen reachable.
+          • Logout clears both Supabase and Legacy sessions.
+      Admin Supabase creds: admin@healthguard.com / AdminPassword123!
+      Admin Legacy creds:   admin@healthguard.com / Admin@123
+      Caregiver Supabase:   caregiver@healthguard.com / Caregiver123!
+      Caregiver Legacy:     caregiver@healthguard.com / Caregiver@123
