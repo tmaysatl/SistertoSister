@@ -25,6 +25,35 @@ async function authHeaders(): Promise<Record<string, string>> {
   return h;
 }
 
+/**
+ * Returns the current Bearer token (Supabase access token if a session is
+ * live, otherwise the legacy `userToken`). Returns null if the caller is
+ * unauthenticated. Use this in places that need just the token string (e.g.
+ * to authenticate a fetch that streams binary like PDF blobs).
+ */
+export async function getAuthToken(): Promise<string | null> {
+  if (SUPABASE_CONFIGURED) {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const sbToken = data.session?.access_token;
+      if (sbToken) return sbToken;
+    } catch {
+      /* fall through */
+    }
+  }
+  return AsyncStorage.getItem("userToken");
+}
+
+/**
+ * Returns the full headers map (Content-Type JSON + Authorization Bearer)
+ * for an authenticated request. Use this instead of building headers
+ * manually from AsyncStorage.getItem("userToken") — that pattern misses
+ * the Supabase session and causes silent 401s in Supabase mode.
+ */
+export async function getAuthHeaders(): Promise<Record<string, string>> {
+  return authHeaders();
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);

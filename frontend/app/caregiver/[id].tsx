@@ -9,7 +9,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { apiGet, apiPost, API_BASE } from "@/src/api/client";
+import { apiGet, apiPost, API_BASE, getAuthToken } from "@/src/api/client";
 import { useAuth } from "@/src/context/AuthContext";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { theme, BRAND_NAME } from "@/src/theme";
@@ -90,7 +90,7 @@ export default function CaregiverDetail() {
     if (res.canceled || !res.assets?.length) return;
     const b64 = res.assets[0].base64;
     if (!b64) return;
-    const token = await AsyncStorage.getItem("userToken");
+    const token = await getAuthToken();
     await fetch(`${API_BASE}/users/${id}/photo`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },

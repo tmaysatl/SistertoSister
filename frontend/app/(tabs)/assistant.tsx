@@ -6,7 +6,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { API_BASE } from "@/src/api/client";
+import { API_BASE, getAuthToken } from "@/src/api/client";
 import { theme } from "@/src/theme";
 
 type Msg = { id: string; role: "user" | "assistant"; content: string };
@@ -39,7 +39,7 @@ export default function Assistant() {
     setStreaming(true);
 
     try {
-      const token = await AsyncStorage.getItem("userToken");
+      const token = await getAuthToken();
       const res = await fetch(`${API_BASE}/assistant/chat`, {
         method: "POST",
         headers: {

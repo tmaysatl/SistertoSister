@@ -4,8 +4,7 @@ import { WebView } from "react-native-webview";
 import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { API_BASE } from "../../api/client";
+import { API_BASE, getAuthToken } from "../../api/client";
 import { theme } from "../../theme";
 
 type Props = {
@@ -47,10 +46,20 @@ export function PdfViewerModal({
         const target = url || `${API_BASE}${path}`;
         const headers: Record<string, string> = {};
         if (path) {
-          const t = await AsyncStorage.getItem("userToken");
+          const t = await getAuthToken();
           if (t) headers.Authorization = `Bearer ${t}`;
         }
         const res = await fetch(target, { headers });
+        if (!res.ok) {
+          // Surface a useful error instead of rendering an HTML error body
+          // as if it were a PDF (that was the source of "wrong document"
+          // bug reports — a 401/500 HTML response embedded in the iframe).
+          throw new Error(`Document fetch failed: ${res.status}`);
+        }
+        const ct = res.headers.get("content-type") || "";
+        if (!ct.includes("pdf") && !ct.includes("octet-stream")) {
+          throw new Error(`Unexpected content-type: ${ct || "unknown"}`);
+        }
         const blob = await res.blob();
         if (Platform.OS === "web") {
           setBlobUrl(URL.createObjectURL(blob));
@@ -62,8 +71,9 @@ export function PdfViewerModal({
           };
           r.readAsDataURL(blob);
         }
-      } catch (e) { console.log("pdf modal load", e); }
-      finally { setLoading(false); }
+      } catch (e) {
+        console.log("pdf modal load failed:", e);
+      } finally { setLoading(false); }
     })();
     return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,7 +87,7 @@ export function PdfViewerModal({
         : `${API_BASE}${publicSignPath}`;
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (signPath) {
-        const t = await AsyncStorage.getItem("userToken");
+        const t = await getAuthToken();
         if (t) headers.Authorization = `Bearer ${t}`;
       }
       const res = await fetch(target!, {

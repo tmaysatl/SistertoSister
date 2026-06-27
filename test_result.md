@@ -108,6 +108,36 @@ user_problem_statement: |
   Dual-write pattern keeps Mongo authoritative until Phase 7 cutover.
 
 backend:
+  - task: "PDF stamped endpoint — Unicode-safe Content-Disposition (Latin-1 crash)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          USER REPORT: "the PDF documents are not the same ones loaded".
+          ROOT CAUSE #1 (backend): GET /api/documents/{id}/stamped and the
+          packet doc endpoint built `Content-Disposition: inline; filename="{title}.pdf"`
+          using the raw document title. Starlette encodes response headers as
+          Latin-1, so any title containing a non-ASCII glyph (em-dash, smart
+          quotes, accented letters — common in our seed data, e.g. "Policy &
+          Procedure Handbook — Sister to Sister, PHCP") raised
+          UnicodeEncodeError mid-response → 500 with NO PDF body. The browser
+          then either showed the previously-cached PDF (the WRONG document)
+          or a blank pane, which is exactly the "documents are not the same
+          ones loaded" symptom.
+          FIX: Added `_safe_disposition()` helper in server.py that emits
+          RFC-5987 compliant Content-Disposition with both an ASCII
+          `filename=` (non-ASCII bytes replaced with `_`) AND a
+          `filename*=UTF-8''<percent-encoded>` form. Both PDF stamped routes
+          (lines ~774 and ~1430) now use the helper. Verified end-to-end
+          with the em-dash doc: HTTP 200, %PDF-1.7 body, 21 MB payload,
+          Content-Disposition includes both forms.
+
   - task: "Phase 5 Slice J — MS Graph integrations dual-write (Mongo + Postgres)"
     implemented: true
     working: true
@@ -125,6 +155,45 @@ backend:
           for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
 
 frontend:
+  - task: "PDF viewer + auth helpers — use Supabase JWT, not stale legacy userToken"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/api/client.ts, /app/frontend/src/components/pdf/PdfViewerModal.tsx, /app/frontend/src/utils/open-file.ts, /app/frontend/app/(tabs)/assistant.tsx, /app/frontend/app/caregiver/[id].tsx, /app/frontend/app/client/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          ROOT CAUSE #2 (frontend, same user report "PDFs not the same ones loaded"):
+          Six frontend callsites bypassed the canonical authHeaders() helper
+          and read `AsyncStorage.getItem("userToken")` directly — that's the
+          LEGACY JWT key, which is empty when the user is logged in via
+          Supabase mode (the default). Consequences in Supabase mode:
+            - PdfViewerModal sent no/wrong Authorization header → backend
+              returned 401 (HTML/JSON) → modal swallowed the error and the
+              iframe rendered the stale previously-loaded blob (literally a
+              different document than the one the user tapped). The error
+              also masked the unicode-title 500 above.
+            - assistant.tsx AI chat sent `Bearer null` → 401 → no streaming.
+            - caregiver / client photo upload, openAuthedFile (binder
+              downloads) — same pattern.
+          FIX: api/client.ts exports two new helpers: `getAuthToken()`
+          (returns Supabase access token if a session is live, else legacy
+          `userToken`, else null) and `getAuthHeaders()` (full headers map).
+          Patched all six callsites:
+            • PdfViewerModal.tsx (read + sign paths) — also adds an explicit
+              content-type guard so an error response can no longer be
+              mistaken for a PDF.
+            • utils/open-file.ts (openAuthedFile)
+            • app/(tabs)/assistant.tsx
+            • app/caregiver/[id].tsx (photo upload)
+            • app/client/[id].tsx (photo upload)
+          AuthContext.tsx:78 is the only callsite that still reads
+          `userToken` directly — that is the legacy-mode bootstrap and is
+          correct.
+
   - task: "Login bug — stale password autofill caused 'Incorrect email or password'"
     implemented: true
     working: true

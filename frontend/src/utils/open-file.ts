@@ -1,8 +1,7 @@
 import { Platform, Linking } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
-import { API_BASE } from "../api/client";
+import { API_BASE, getAuthToken } from "../api/client";
 
 function safeFileName(s: string): string {
   return s.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 80);
@@ -58,7 +57,7 @@ async function openNative(blob: Blob, filename: string): Promise<void> {
 }
 
 export async function openAuthedFile(path: string, filename = "document.pdf"): Promise<void> {
-  const token = await AsyncStorage.getItem("userToken");
+  const token = await getAuthToken();
   const res = await fetch(`${API_BASE}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });

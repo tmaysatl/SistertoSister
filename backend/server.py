@@ -3,9 +3,11 @@ from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 import os
 import io
+import re
 import asyncio
 import base64
 import logging
+from urllib.parse import quote as _urlquote
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Literal
 import uuid
@@ -26,6 +28,22 @@ from core import supa_data
 from core.push import send_push, _push_client
 from core.settings import EMERGENT_LLM_KEY
 from core.pdf_utils import _load_logo, _make_watermark, stamp_pdf
+
+
+def _safe_disposition(filename: str, mode: str = "inline") -> str:
+    """Build an RFC 5987-compliant Content-Disposition header value.
+
+    The `filename` parameter is restricted to ASCII (Starlette encodes
+    headers as latin-1 and will raise UnicodeEncodeError on smart quotes,
+    em-dashes etc.), but `filename*` may carry UTF-8 percent-encoded text.
+    Browsers / mobile WebViews honour the UTF-8 form when present and fall
+    back to the ASCII form otherwise — so we always supply both.
+    """
+    safe_ascii = re.sub(r'[^\x20-\x7e]', '_', filename or 'document')
+    # Quote any embedded double-quotes for the legacy filename= form.
+    safe_ascii = safe_ascii.replace('"', '_')
+    utf8 = _urlquote(filename or 'document', safe='')
+    return f'{mode}; filename="{safe_ascii}"; filename*=UTF-8\'\'{utf8}'
 from models import (
     UserPublic, RegisterRequest, LoginRequest, TokenResponse,
     Client, ClientCreate, ClientTask,
@@ -753,7 +771,7 @@ async def get_stamped_document(
     return Response(
         content=stamped,
         media_type=d.get("mime_type") or "application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{d["title"]}.pdf"'},
+        headers={"Content-Disposition": _safe_disposition(f'{d["title"]}.pdf')},
     )
 
 
@@ -1409,7 +1427,7 @@ async def packet_doc_stamped(token_str: str, doc_id: str):
     return Response(
         content=stamped,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{d["title"]}.pdf"'},
+        headers={"Content-Disposition": _safe_disposition(f'{d["title"]}.pdf')},
     )
 
 
