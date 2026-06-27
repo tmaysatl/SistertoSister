@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 21 — Verified frontend login bug fix (stale password autofill after persisted-mode reload). FRONTEND ONLY testing on the preview URL (mobile viewport 390x844). 7/7 Playwright scenarios PASSED: (1) Fresh load → email auto-fills to admin@healthguard.com, password field is empty, mode pill = 'Auth: Supabase · tap to switch'. (2) Supabase login (default) → typing AdminPassword123! and tapping login-submit-button rendered the dashboard (stat-clients=1, stat-caregivers=12, stat-documents=50). (3) Legacy login → toggling auth-mode-toggle flipped pill to 'Auth: Legacy (MongoDB) · tap to switch'; password field stayed empty; typing Admin@123 reached the dashboard. (4) PERSISTED-MODE SAFETY (the original user-reported bug) → after Legacy login, logout via logout-button, page.reload(): mode pill remained Legacy, email pre-filled, password field EMPTY (no stale 'AdminPassword123!' carryover); typing Admin@123 logged in successfully. (5) Empty-submit guard → clearing both fields and tapping submit showed inline 'Email and password are required'; ZERO network requests fired (verified via page.on('request') listener watching /auth/login, /auth/v1/token, /supabase/me). (6) Wrong-password error normalisation → Legacy 'wrongpassword' (backend 401) and Supabase 'wrongpassword' (Supabase 400 'Invalid login credentials') BOTH surfaced the same UI string 'Incorrect email or password'. (7) Regression sanity → Documents tab loaded with 30 delete-doc-* cards and 27 view-doc-* eye-icons (matches the 38/12 storage_path split from iteration 20); signout-then-reload returned to login screen with an empty password field. Backend logs corroborate: 'POST /api/auth/login 200 OK' for success paths and 'POST /api/auth/login 401 Unauthorized' for the Legacy wrong-pwd path.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_21.json"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "login.tsx:27-29 — single-shot useEffect using setEmail(prev => prev ? prev : 'admin@healthguard.com') is the correct fix: it never overwrites a value the user has typed, and the password field is left untouched so there is no possibility of a stale autofill that conflicts with the persisted mode resolved asynchronously by AuthContext.",
+    "login.tsx:54-61 — error-normalisation block correctly maps both 'Invalid login credentials' (Supabase) and 'Incorrect email or password' (legacy FastAPI) to the same UI string, while preserving distinct network-error messaging. Verified at runtime for both modes.",
+    "AuthContext.tsx:46-48 — storedMode bootstrap fallback is consistent. The fix removes the prior race because login.tsx no longer derives its initial password from `mode` at render time.",
+    "AuthContext.tsx:196-202 — logout() always calls supabase.auth.signOut() (when configured) and clears userToken/userInfo/sbUserInfo. Verified via signout+reload returning to a fully-cleared login screen.",
+    "Pre-existing console warning 'props.pointerEvents is deprecated. Use style.pointerEvents' is non-blocking and shows up across the app — not blocking login, but worth tracking for a future Expo SDK migration sweep."
+  ],
+  "updated_files": [
+    "/app/test_result.md (frontend.tasks[Login bug ...] working=true, needs_retesting=false; added agent_communication entry under 'testing' role; cleared test_plan.current_focus)",
+    "/app/test_reports/iteration_21.json (this report)"
+  ],
+  "success_rate": {
+    "backend": "N/A — frontend-only iteration",
+    "frontend": "100% (7/7 scenarios PASSED): fresh-load state, Supabase login, Legacy login, persisted-mode reload safety, empty-submit guard, wrong-password normalisation in both modes, regression on Documents tab + clean signout."
+  },
+  "seed_data_creation": "None. No test data was created — only login/logout/reload cycles against existing seeded users.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login is GREEN. The fix (removed password autofill at mount, email pre-fill only when blank, error normalisation) is in /app/frontend/app/(auth)/login.tsx and confirmed working in both Supabase (default) and Legacy modes. The critical regression to watch is in login.tsx:27-29 — DO NOT reintroduce a useState initializer or useEffect that derives the password from `mode`, because mode is resolved asynchronously by AuthContext.tsx:46-48 from AsyncStorage. The empty-submit guard at login.tsx:39-42 must stay before the loading state is set. Wrong-password matching strings in the error normaliser are 'invalid login', 'incorrect email', and 'invalid_grant' (all lowercased) — keep these in sync with backend/Supabase response strings if either side changes. Backend logs cleanly show 200 OK on success and 401 (legacy) / 400 (Supabase) on credential failures. No other regressions detected.",
+  "rca_of_issue": "ORIGINAL BUG: login.tsx initialised the password state from `mode === 'supabase'` at component mount. AuthContext.tsx bootstraps the persisted mode from AsyncStorage asynchronously — so on a cold reload where the persisted mode was 'legacy', the password field still autofilled 'AdminPassword123!' (the Supabase password) while the mode pill correctly displayed 'Legacy'. Tapping Sign in submitted the Supabase password to /api/auth/login → 401 'Incorrect email or password' → user blocked. FIX (verified): removed the password autofill entirely; email auto-fills only when blank via one-shot useEffect; password always starts empty and is typed by the user. Tested all 7 review scenarios; all pass. MITIGATION FOR REGRESSION: keep login form state independent of `mode` to avoid the AsyncStorage-resolved-async race."
+}

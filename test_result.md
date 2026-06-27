@@ -125,6 +125,80 @@ backend:
           for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
 
 frontend:
+  - task: "Login bug — stale password autofill caused 'Incorrect email or password'"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Iteration 21 verified GREEN end-to-end via Playwright on the preview
+          URL (mobile viewport 390x844). All 7 scenarios passed:
+            1. Fresh-load bug-repro protection — email auto-filled to
+               admin@healthguard.com, password field EMPTY, mode pill says
+               "Auth: Supabase · tap to switch".
+            2. Supabase login default — typing AdminPassword123! and tapping
+               login-submit-button reached the dashboard (stat-clients=1,
+               stat-caregivers=12, stat-documents=50).
+            3. Legacy login — toggling auth-mode-toggle flipped the pill to
+               "Auth: Legacy (MongoDB)"; password field remained empty; typing
+               Admin@123 reached the dashboard.
+            4. Persisted mode safety (the ORIGINAL BUG) — after Legacy login,
+               logout via logout-button, page.reload(), the mode pill still
+               said Legacy, email pre-filled, AND the password field was empty
+               (NO stale 'AdminPassword123!' carryover). Typing Admin@123
+               logged in successfully.
+            5. Empty-submit guard — clearing both fields and tapping submit
+               showed inline 'Email and password are required'; zero network
+               requests fired.
+            6. Wrong-password error normalisation — Legacy mode with
+               'wrongpassword' surfaced 'Incorrect email or password' (from
+               401); Supabase mode with same input also surfaced
+               'Incorrect email or password' (normalised from the Supabase
+               'Invalid login credentials' / 400 response). Both modes share
+               the same UI string.
+            7. Regression sanity — Documents tab loaded with 30 delete-doc-*
+               cards and 27 view-doc-* eye icons (matches the 38/12 storage_path
+               split observed in iteration 20); signout+reload returned to the
+               login screen with an empty password.
+          The root-cause fix in login.tsx (removing the password autofill at
+          mount and only prefilling the email when blank) holds. Marking the
+          task working=true, needs_retesting=false.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          USER REPORT: "The login feature does not work."
+          ROOT CAUSE:
+          login.tsx initialised the `password` state from `mode === "supabase"`
+          AT MOUNT TIME, but the AuthContext bootstrap effect restores the
+          persisted mode from AsyncStorage asynchronously. Sequence:
+            1. login.tsx mounts → mode='supabase' (default) → password autofilled
+               as 'AdminPassword123!'
+            2. AuthContext useEffect resolves storedMode='legacy' → flips mode
+            3. login.tsx re-renders showing "Auth: Legacy" pill, but the
+               password state is unchanged → still 'AdminPassword123!'
+            4. User taps Sign in → POST /api/auth/login with Supabase-style
+               password → backend returns 401 "Incorrect email or password".
+          The user sees the Legacy pill and a correct-looking obscured field,
+          so they (correctly) believe login is broken.
+          FIX:
+          1. Removed credential auto-fill from `useState` initialisers.
+             Email auto-fills only if blank (one-shot useEffect).
+             Password ALWAYS starts blank and the user types whichever
+             password matches the active mode — no more stale autofill.
+          2. Better error messages: distinguishes credential failure from
+             network failure and from generic errors (no more silently
+             showing "Incorrect email or password" when the real issue is a
+             timeout or 500).
+          3. Empty-field guard before submit.
+          Manual reproduction in Playwright (preview URL) confirmed login
+          worked when the form is filled correctly — the bug only manifests
+          when the user trusts the (out-of-sync) autofill.
+
   - task: "Documents UI — gate Open/View button on storage_path (not file_base64)"
     implemented: true
     working: true
@@ -224,13 +298,76 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Documents UI — gate Open/View button on storage_path (not file_base64)"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Iteration 21 — Login bug verification VERIFIED GREEN.
+      Ran 7 Playwright scenarios on the preview URL (mobile 390x844) covering
+      fresh-load state, Supabase login, Legacy login, the persisted-mode
+      reload safety scenario (the original user-reported bug), empty-submit
+      guard, wrong-password normalisation for BOTH modes, regression sanity
+      on Documents tab, and clean signout. All 7 PASSED. Backend logs confirm
+      a 401 from POST /api/auth/login for the wrong-pwd Legacy case and a 400
+      from Supabase for the wrong-pwd Supabase case — both surfaced the same
+      normalised UI string "Incorrect email or password". The persisted-mode
+      reload test specifically confirmed the password field is EMPTY after
+      reload (i.e. the originally buggy stale autofill is gone). Updated
+      frontend.tasks[Login bug ...] working=true, needs_retesting=false. No
+      retest required.
+
+  - agent: "main"
+    message: |
+      USER REPORTED LOGIN BUG — FIX APPLIED, NEEDS VERIFICATION.
+      Root cause: login.tsx autofilled the password at mount from `mode`,
+      but mode was overwritten async by the persisted AsyncStorage value,
+      leaving the wrong password in the field. Removed the password autofill
+      entirely; email autofills only if empty. Improved error reporting so
+      network failures aren't mislabeled as credentials failures.
+
+      PLEASE VERIFY (FRONTEND ONLY — backend is already known good):
+
+      Scenario A — Fresh load, Supabase mode (default), type the correct
+      Supabase password manually:
+        1. Open /
+        2. The email field should already show admin@healthguard.com.
+        3. The password field MUST be empty on first load.
+        4. Type: AdminPassword123!
+        5. Tap Sign in → should land on /(tabs) and render the dashboard.
+
+      Scenario B — Toggle to Legacy mode and sign in:
+        1. From the login screen, tap the "Auth: Supabase · tap to switch"
+           pill → pill flips to "Auth: Legacy (MongoDB) · tap to switch".
+        2. Password field remains empty (no stale autofill).
+        3. Type: Admin@123
+        4. Tap Sign in → should land on /(tabs) and render dashboard.
+
+      Scenario C — Persistent mode bug (the original report):
+        1. From a working signed-in state, sign out (top-right power icon).
+        2. After landing on login, toggle to Legacy and type Admin@123 →
+           login succeeds. (This sets persisted mode=legacy.)
+        3. Sign out again, hard-refresh the page.
+        4. CRITICAL: on reload the password field is EMPTY (not pre-filled
+           with AdminPassword123!), and the pill correctly says "Legacy".
+        5. Type Admin@123 → Sign in → succeeds.
+        (Previously this scenario failed because the password autofilled
+        with the Supabase password while the mode was legacy.)
+
+      Scenario D — Empty-submit guard:
+        1. Clear both fields → tap Sign in → error "Email and password are required".
+
+      Scenario E — Bad password yields the correct error:
+        1. Type admin@healthguard.com / wrongpass → Sign in →
+           error "Incorrect email or password" (not a generic / network msg).
+
+      Credentials reminder:
+        Supabase: admin@healthguard.com / AdminPassword123!
+        Legacy:   admin@healthguard.com / Admin@123
+
   - agent: "main"
     message: |
       UI/DATA FIX: Documents tab now only shows the Open/View button when the

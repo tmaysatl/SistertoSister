@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   View, Text, TextInput, Pressable, StyleSheet,
   KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator,
@@ -13,27 +13,52 @@ import { theme, BRAND_NAME, BRAND_TAGLINE, LOGO_URL } from "@/src/theme";
 export default function Login() {
   const { login, mode, setMode } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState("admin@healthguard.com");
-  const [password, setPassword] = useState(mode === "supabase" ? "AdminPassword123!" : "Admin@123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // If the user lands on the screen with empty fields, prefill the demo
+  // admin email (does NOT touch the field if they've already typed). Password
+  // is intentionally left blank so users always type the active-mode password
+  // themselves — this avoids the historical bug where a stale autofill
+  // (e.g. the Supabase password while the persisted mode was Legacy) caused
+  // every sign-in to fail with "Incorrect email or password".
+  useEffect(() => {
+    setEmail((prev) => (prev ? prev : "admin@healthguard.com"));
+  }, []);
 
   const toggleMode = async () => {
     const next = mode === "supabase" ? "legacy" : "supabase";
     await setMode(next);
-    // adjust default password hint to match active mode
-    setPassword(next === "supabase" ? "AdminPassword123!" : "Admin@123");
     setError(null);
   };
 
   const onSubmit = async () => {
     setError(null);
+    if (!email.trim() || !password) {
+      setError("Email and password are required");
+      return;
+    }
     setLoading(true);
     try {
       await login(email.trim(), password);
       router.replace("/(tabs)");
     } catch (e: any) {
-      setError("Incorrect email or password");
+      const raw = String(e?.message || e || "");
+      // Surface the most useful piece of the error. Supabase returns JSON like
+      // {"error":"invalid_grant","error_description":"Invalid login credentials"}
+      // and the FastAPI legacy login returns {"detail":"Incorrect email or password"}.
+      // Anything else (e.g. network failure) is shown verbatim so we don't
+      // mislabel a connectivity problem as a credentials problem.
+      const lower = raw.toLowerCase();
+      if (lower.includes("invalid login") || lower.includes("incorrect email") || lower.includes("invalid_grant")) {
+        setError("Incorrect email or password");
+      } else if (lower.includes("failed to fetch") || lower.includes("network") || lower.includes("typeerror")) {
+        setError("Can't reach the server. Check your connection.");
+      } else {
+        setError(raw.slice(0, 180) || "Sign in failed");
+      }
     } finally {
       setLoading(false);
     }
