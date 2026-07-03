@@ -241,11 +241,11 @@ export default function DynamicFormRenderer({
             {f.required ? " *" : ""}
           </Text>
           <View style={styles.chipRow}>
-            {f.options.map((opt) => {
+            {f.options.map((opt, idx) => {
               const on = selected.includes(opt);
               return (
                 <Pressable
-                  key={opt}
+                  key={`${opt}-${idx}`}
                   testID={`dyn-check-${f.field_name}-${opt}`}
                   onPress={() => toggle(opt)}
                   style={[styles.checkChip, on && styles.checkChipOn]}
@@ -292,11 +292,11 @@ export default function DynamicFormRenderer({
           {f.required ? " *" : ""}
         </Text>
         <View style={styles.chipRow}>
-          {opts.map((opt) => {
+          {opts.map((opt, idx) => {
             const on = current === opt;
             return (
               <Pressable
-                key={opt}
+                key={`${opt}-${idx}`}
                 testID={`dyn-radio-${f.field_name}-${opt}`}
                 onPress={() => set(f.field_name, opt)}
                 style={[styles.radioChip, on && styles.radioChipOn]}
@@ -337,11 +337,11 @@ export default function DynamicFormRenderer({
             <Text style={styles.hint}>(select all that apply)</Text>
           </Text>
           <View style={styles.chipRow}>
-            {opts.map((opt) => {
+            {opts.map((opt, idx) => {
               const on = selected.includes(opt);
               return (
                 <Pressable
-                  key={opt}
+                  key={`${opt}-${idx}`}
                   onPress={() => toggle(opt)}
                   style={[styles.checkChip, on && styles.checkChipOn]}
                 >
@@ -365,11 +365,11 @@ export default function DynamicFormRenderer({
           {f.required ? " *" : ""}
         </Text>
         <View style={styles.chipRow}>
-          {opts.map((opt) => {
+          {opts.map((opt, idx) => {
             const on = current === opt;
             return (
               <Pressable
-                key={opt}
+                key={`${opt}-${idx}`}
                 onPress={() => set(f.field_name, opt)}
                 style={[styles.radioChip, on && styles.radioChipOn]}
               >
