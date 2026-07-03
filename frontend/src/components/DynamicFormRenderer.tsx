@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -14,34 +14,57 @@ import {
   Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { API_BASE, getAuthHeaders } from "@/src/api/client";
 import { theme } from "@/src/theme";
+import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 
 /**
- * DynamicFormRenderer — Phase 2 schema-driven form.
+ * DynamicFormRenderer — Phase 2 (baseline) + Phase 3 (validation, view
+ * original PDF, draft auto-save, signature capture).
  *
- * Fetches GET /api/documents/{documentId}/schema (returned by the backend
- * PDF parser) and renders one input per detected field. All inputs are
- * built from React Native primitives — no web form libraries, no HTML.
- * Submission POSTs to /api/documents/{documentId}/submissions.
+ * Fetches GET /api/documents/{documentId}/schema and renders one input
+ * per detected field using React Native primitives only.
  *
- * Field-type mapping:
- *   - text        -> <TextInput>
- *   - checkbox    -> <Switch> (or options-driven checkbox group)
- *   - radio       -> pressable radio group (driven by field.options)
- *   - combobox    -> pressable inline selector (options list)
- *   - listbox     -> pressable inline selector (multi-select)
- *   - signature   -> placeholder ("Signature capture coming soon")
- *   - button      -> skipped (buttons in a PDF aren't user input)
- *
- * State: one flat useState({}) keyed by `field_name`. No external state lib.
- * Fields are grouped by `page` with a "Page N of M" divider so 180+ fields
- * remain navigable. Wrapped in ScrollView + KeyboardAvoidingView.
- *
- * Note: this component intentionally REPLACES the legacy FillableFormModal
- * in the documents tab. The legacy component still lives at
- * `_LegacyEmploymentForm.tsx` and can be re-imported to roll back.
+ * Phase 3 additions:
+ *   - Field-level validation: `required` (from schema) is enforced, plus
+ *     heuristic format checks on text fields based on the field name
+ *     (email, date, phone, SSN, ZIP). Errors render inline and block Submit.
+ *   - "View Original PDF" button in the header opens the PdfViewerModal
+ *     on top of the form so users can cross-reference the source form.
+ *   - Draft auto-save to AsyncStorage under `formDraft:{documentId}` on a
+ *     500ms debounce. Restored automatically on next open. Cleared on
+ *     successful submit or explicit "Discard draft".
+ *   - Signature capture: replaces the "coming soon" placeholder with a
+ *     SignatureScreen modal (react-native-signature-canvas) that stores
+ *     the base64 PNG in values[field_name].
  */
+
+// ---- Heuristic format validators ------------------------------------------
+// The /schema response has no explicit format metadata (Phase 1 kept it
+// minimal), so we derive format hints from the field name — same approach
+// most legacy fillable-form apps use. Keep the regexes deliberately
+// permissive; we're guarding against obvious typos, not enforcing strict
+// bank-grade formats.
+const FMT_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+const FMT_DATE = /^(?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4})$/;
+const FMT_PHONE = /^[\d\s()+.-]{7,}$/;
+const FMT_SSN = /^\d{3}-?\d{2}-?\d{4}$/;
+const FMT_ZIP = /^\d{5}(?:-\d{4})?$/;
+
+function inferFormat(fieldName: string): {
+  test: (v: string) => boolean;
+  hint: string;
+} | null {
+  const n = fieldName.toLowerCase();
+  if (/e[-\s]?mail\b/.test(n)) return { test: (v) => FMT_EMAIL.test(v), hint: "Enter a valid email" };
+  if (/\b(date|dob|d\.o\.b|birth)\b/.test(n)) return { test: (v) => FMT_DATE.test(v), hint: "Use YYYY-MM-DD or MM/DD/YYYY" };
+  if (/\bphone|cell|mobile|tel\b/.test(n)) return { test: (v) => FMT_PHONE.test(v), hint: "Enter a valid phone number" };
+  if (/\bssn|social security\b/.test(n)) return { test: (v) => FMT_SSN.test(v), hint: "Format: 123-45-6789" };
+  if (/\bzip|postal\b/.test(n)) return { test: (v) => FMT_ZIP.test(v), hint: "5 or 9-digit ZIP" };
+  return null;
+}
 
 // ---- Types matching the /schema response ----------------------------------
 type SchemaField = {
@@ -101,14 +124,30 @@ export default function DynamicFormRenderer({
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Phase 3 — validation errors keyed by field_name; populated on Submit
+  // and cleared as the user edits the offending field.
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  // Phase 3 — nested modals
+  const [viewOriginal, setViewOriginal] = useState(false);
+  const [signingField, setSigningField] = useState<SchemaField | null>(null);
+  // Phase 3 — draft-restore banner (auto-dismisses after 4s)
+  const [restoredBanner, setRestoredBanner] = useState(false);
+  // Ref-mirror of `values` for the debounced saver (avoids stale closures).
+  const valuesRef = useRef<Record<string, any>>({});
+  valuesRef.current = values;
 
-  // Fetch schema whenever the modal opens for a new documentId.
+  const draftKey = documentId ? `formDraft:${documentId}` : null;
+
+  // Fetch schema whenever the modal opens for a new documentId, then merge
+  // any locally-persisted draft on top so the user picks up where they left off.
   const loadSchema = useCallback(async () => {
     if (!documentId) return;
     setLoading(true);
     setError(null);
+    setErrors({});
     setValues({});
     setEnvelope(null);
+    setRestoredBanner(false);
     try {
       const headers = await getAuthHeaders();
       const res = await fetch(
@@ -130,17 +169,78 @@ export default function DynamicFormRenderer({
           seed[f.field_name] = false;
         }
       }
+      // Phase 3: overlay any AsyncStorage draft on top of the seed.
+      let hadDraft = false;
+      if (draftKey) {
+        try {
+          const raw = await AsyncStorage.getItem(draftKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") {
+              Object.assign(seed, parsed);
+              hadDraft = true;
+            }
+          }
+        } catch {
+          /* draft parse failure is non-fatal — just skip restore */
+        }
+      }
       setValues(seed);
+      if (hadDraft) {
+        setRestoredBanner(true);
+        setTimeout(() => setRestoredBanner(false), 4000);
+      }
     } catch (e: any) {
       setError(e?.message || "Failed to load form");
     } finally {
       setLoading(false);
     }
-  }, [documentId]);
+  }, [documentId, draftKey]);
 
   useEffect(() => {
     if (visible) loadSchema();
   }, [visible, loadSchema]);
+
+  // Phase 3 — debounced draft auto-save. Persists `values` to AsyncStorage
+  // 500ms after the last edit. Skipped while loading (would otherwise clobber
+  // the stored draft with the seed values before we merge them in).
+  useEffect(() => {
+    if (!visible || !draftKey || loading) return;
+    const handle = setTimeout(() => {
+      // Only persist if there's at least one non-empty value — avoids
+      // writing an empty {} draft on first mount.
+      const v = valuesRef.current;
+      const hasContent = Object.values(v).some(
+        (x) => x !== "" && x !== false && x != null &&
+               !(Array.isArray(x) && x.length === 0)
+      );
+      if (hasContent) {
+        AsyncStorage.setItem(draftKey, JSON.stringify(v)).catch(() => {});
+      }
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [values, visible, draftKey, loading]);
+
+  const discardDraft = useCallback(async () => {
+    if (!draftKey) return;
+    Alert.alert(
+      "Discard draft?",
+      "This clears the locally saved values for this form. You can't undo this.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Discard",
+          style: "destructive",
+          onPress: async () => {
+            await AsyncStorage.removeItem(draftKey).catch(() => {});
+            setValues({});
+            setErrors({});
+            setRestoredBanner(false);
+          },
+        },
+      ]
+    );
+  }, [draftKey]);
 
   // Group fields by page (1-indexed) for the "Page N of M" dividers. Buttons
   // are skipped entirely (not user input) — see mapping table above.
@@ -164,10 +264,55 @@ export default function DynamicFormRenderer({
 
   const set = useCallback((k: string, v: any) => {
     setValues((s) => ({ ...s, [k]: v }));
+    // Clear a stale error for this field as the user edits.
+    setErrors((prev) => {
+      if (!prev[k]) return prev;
+      const next = { ...prev };
+      delete next[k];
+      return next;
+    });
   }, []);
+
+  // Phase 3 — validation pass. Returns a map of field_name → error message.
+  const validate = useCallback((): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const f of envelope?.fields || []) {
+      if (f.field_type === "button") continue;
+      const v = values[f.field_name];
+      // Required check first
+      if (f.required) {
+        const empty =
+          v == null ||
+          v === "" ||
+          v === false ||
+          (Array.isArray(v) && v.length === 0);
+        if (empty) {
+          out[f.field_name] = "This field is required";
+          continue;
+        }
+      }
+      // Format check (text fields only, only if the user typed something)
+      if (f.field_type === "text" && typeof v === "string" && v.trim() !== "") {
+        const fmt = inferFormat(f.field_name);
+        if (fmt && !fmt.test(v.trim())) {
+          out[f.field_name] = fmt.hint;
+        }
+      }
+    }
+    return out;
+  }, [envelope, values]);
 
   const submit = async () => {
     if (!documentId || !envelope) return;
+    const found = validate();
+    if (Object.keys(found).length > 0) {
+      setErrors(found);
+      Alert.alert(
+        "Fix errors",
+        `${Object.keys(found).length} field${Object.keys(found).length === 1 ? "" : "s"} need attention.`,
+      );
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -185,6 +330,11 @@ export default function DynamicFormRenderer({
         throw new Error(t || `Submit failed: ${res.status}`);
       }
       const body = await res.json();
+      // Phase 3 — draft is stale after successful submit; clear it so the
+      // next open starts clean.
+      if (draftKey) {
+        AsyncStorage.removeItem(draftKey).catch(() => {});
+      }
       Alert.alert(
         "Submitted",
         `Saved ${body.field_count ?? 0} field${(body.field_count ?? 0) === 1 ? "" : "s"} for ${documentTitle || "this document"}.`
@@ -201,23 +351,40 @@ export default function DynamicFormRenderer({
   };
 
   // -------- Field renderers ------------------------------------------------
-  const renderTextField = (f: SchemaField) => (
-    <View style={styles.fieldBlock}>
-      <Text style={styles.label}>
-        {cleanLabel(f.field_name)}
-        {f.required ? " *" : ""}
-      </Text>
-      <TextInput
-        testID={`dyn-field-${f.field_name}`}
-        value={values[f.field_name] ?? ""}
-        onChangeText={(v) => set(f.field_name, v)}
-        placeholder=""
-        placeholderTextColor={theme.colors.muted}
-        style={styles.input}
-        multiline={false}
-      />
-    </View>
-  );
+  const renderTextField = (f: SchemaField) => {
+    const err = errors[f.field_name];
+    const fmt = inferFormat(f.field_name);
+    return (
+      <View style={styles.fieldBlock}>
+        <Text style={styles.label}>
+          {cleanLabel(f.field_name)}
+          {f.required ? " *" : ""}
+          {fmt ? <Text style={styles.hint}>  · {fmt.hint}</Text> : null}
+        </Text>
+        <TextInput
+          testID={`dyn-field-${f.field_name}`}
+          value={values[f.field_name] ?? ""}
+          onChangeText={(v) => set(f.field_name, v)}
+          placeholder=""
+          placeholderTextColor={theme.colors.muted}
+          style={[styles.input, err && styles.inputError]}
+          multiline={false}
+          keyboardType={
+            /email/i.test(f.field_name) ? "email-address" :
+            /phone|cell|mobile|tel/i.test(f.field_name) ? "phone-pad" :
+            /zip|postal|ssn|social/i.test(f.field_name) ? "numbers-and-punctuation" :
+            "default"
+          }
+          autoCapitalize={/email/i.test(f.field_name) ? "none" : "sentences"}
+        />
+        {err ? (
+          <Text testID={`dyn-error-${f.field_name}`} style={styles.errorInline}>
+            {err}
+          </Text>
+        ) : null}
+      </View>
+    );
+  };
 
   const renderCheckboxField = (f: SchemaField) => {
     // If the widget carries options (e.g. YES/NO from the text-heuristic),
@@ -382,18 +549,53 @@ export default function DynamicFormRenderer({
     );
   };
 
-  const renderSignatureField = (f: SchemaField) => (
-    <View style={styles.fieldBlock}>
-      <Text style={styles.label}>
-        {cleanLabel(f.field_name)}
-        {f.required ? " *" : ""}
-      </Text>
-      <View style={styles.signaturePlaceholder}>
-        <Ionicons name="create-outline" size={20} color={theme.colors.muted} />
-        <Text style={styles.signatureText}>Signature capture coming soon</Text>
+  const renderSignatureField = (f: SchemaField) => {
+    const captured: string | null =
+      typeof values[f.field_name] === "string" && values[f.field_name].startsWith("data:")
+        ? values[f.field_name]
+        : null;
+    const err = errors[f.field_name];
+    return (
+      <View style={styles.fieldBlock}>
+        <Text style={styles.label}>
+          {cleanLabel(f.field_name)}
+          {f.required ? " *" : ""}
+        </Text>
+        <Pressable
+          testID={`dyn-signature-${f.field_name}`}
+          onPress={() => setSigningField(f)}
+          style={[
+            styles.signaturePlaceholder,
+            captured && styles.signaturePlaceholderFilled,
+            err && styles.inputError,
+          ]}
+        >
+          {captured ? (
+            <View style={styles.signaturePreviewRow}>
+              <Ionicons name="checkmark-circle" size={22} color={theme.colors.success} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.signatureCapturedLabel}>Signature captured</Text>
+                <Text style={styles.signatureCapturedHint}>Tap to re-sign</Text>
+              </View>
+              <Pressable
+                onPress={(e) => { e.stopPropagation(); set(f.field_name, ""); }}
+                hitSlop={10}
+                testID={`dyn-signature-clear-${f.field_name}`}
+              >
+                <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />
+              </Pressable>
+            </View>
+          ) : (
+            <>
+              <Ionicons name="create-outline" size={20} color={theme.colors.brandPrimary} />
+              <Text style={styles.signatureText}>Tap to sign</Text>
+            </>
+          )}
+        </Pressable>
+        {err ? <Text style={styles.errorInline}>{err}</Text> : null}
       </View>
-    </View>
-  );
+    );
+  };
 
   const renderField = (f: SchemaField) => {
     let node: React.ReactNode = null;
@@ -450,6 +652,18 @@ export default function DynamicFormRenderer({
               </Text>
             ) : null}
           </View>
+          {/* Phase 3 — View Original PDF button (only if the doc has a
+              backing file; Phase 1 metadata-only docs never show this). */}
+          {envelope && fieldCount > 0 ? (
+            <Pressable
+              testID="dyn-view-original"
+              onPress={() => setViewOriginal(true)}
+              hitSlop={8}
+              style={styles.headerIconBtn}
+            >
+              <Ionicons name="document-text-outline" size={20} color="#fff" />
+            </Pressable>
+          ) : null}
           <Pressable
             testID="dyn-form-submit"
             onPress={submit}
@@ -495,6 +709,26 @@ export default function DynamicFormRenderer({
             keyboardShouldPersistTaps="handled"
             contentContainerStyle={styles.scrollContent}
           >
+            {/* Phase 3 — draft restored banner (auto-hides after 4s). */}
+            {restoredBanner ? (
+              <View style={styles.draftBanner} testID="dyn-draft-restored">
+                <Ionicons name="save-outline" size={16} color={theme.colors.brandPrimary} />
+                <Text style={styles.draftBannerText}>
+                  Restored your saved draft. Auto-saving as you type.
+                </Text>
+                <Pressable onPress={discardDraft} hitSlop={8} testID="dyn-draft-discard">
+                  <Text style={styles.draftBannerAction}>Discard</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            {Object.keys(errors).length > 0 ? (
+              <View style={styles.errorBanner} testID="dyn-error-banner">
+                <Ionicons name="alert-circle" size={16} color={theme.colors.danger} />
+                <Text style={styles.errorBannerText}>
+                  {Object.keys(errors).length} field{Object.keys(errors).length === 1 ? "" : "s"} need attention
+                </Text>
+              </View>
+            ) : null}
             {grouped.pages.map((pageNum, pageIdx) => {
               const pageFields = grouped.bins[pageNum] || [];
               return (
@@ -531,9 +765,120 @@ export default function DynamicFormRenderer({
           </ScrollView>
         )}
       </KeyboardAvoidingView>
+
+      {/* Phase 3 — View Original PDF (nested modal on top of the form) */}
+      {viewOriginal && documentId ? (
+        <PdfViewerModal
+          visible={viewOriginal}
+          path={`/documents/${documentId}/stamped`}
+          onClose={() => setViewOriginal(false)}
+          title={documentTitle || "Original PDF"}
+        />
+      ) : null}
+
+      {/* Phase 3 — Signature capture sub-modal */}
+      <SignatureCaptureModal
+        visible={!!signingField}
+        fieldLabel={signingField ? cleanLabel(signingField.field_name) : ""}
+        initial={signingField ? values[signingField.field_name] : undefined}
+        onClose={() => setSigningField(null)}
+        onSave={(b64) => {
+          if (signingField) set(signingField.field_name, b64);
+          setSigningField(null);
+        }}
+      />
     </Modal>
   );
 }
+
+// ---- SignatureCaptureModal ------------------------------------------------
+// Wraps react-native-signature-canvas in a full-screen Modal so users can
+// draw with their finger, save (returns a data-URL base64 PNG), clear, or
+// cancel. Kept private to this file — DynamicFormRenderer owns the state
+// of which field is being signed.
+type SigProps = {
+  visible: boolean;
+  fieldLabel: string;
+  initial?: string;
+  onClose: () => void;
+  onSave: (base64: string) => void;
+};
+
+function SignatureCaptureModal({ visible, fieldLabel, initial, onClose, onSave }: SigProps) {
+  const ref = useRef<SignatureViewRef>(null);
+  const [saving, setSaving] = useState(false);
+
+  const handleOK = (b64: string) => {
+    setSaving(false);
+    if (b64 && b64.length > 0) onSave(b64);
+  };
+
+  const handleEmpty = () => {
+    setSaving(false);
+    Alert.alert("Empty signature", "Please draw your signature before saving.");
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="fullScreen"
+      onRequestClose={onClose}
+    >
+      <View style={styles.sigRoot}>
+        <View style={styles.sigHeader}>
+          <Pressable onPress={onClose} hitSlop={10} testID="dyn-sig-cancel">
+            <Ionicons name="close" size={22} color="#fff" />
+          </Pressable>
+          <Text style={styles.sigTitle} numberOfLines={1}>
+            Sign: {fieldLabel || "signature"}
+          </Text>
+          <Pressable
+            testID="dyn-sig-save"
+            onPress={() => { setSaving(true); ref.current?.readSignature(); }}
+            style={styles.sigSaveBtn}
+            disabled={saving}
+          >
+            {saving ? (
+              <ActivityIndicator color={theme.colors.brandPrimary} />
+            ) : (
+              <Text style={styles.sigSaveText}>Save</Text>
+            )}
+          </Pressable>
+        </View>
+        <View style={styles.sigCanvasWrap}>
+          <SignatureScreen
+            ref={ref}
+            onOK={handleOK}
+            onEmpty={handleEmpty}
+            dataURL={initial && typeof initial === "string" && initial.startsWith("data:") ? initial : undefined}
+            descriptionText=""
+            imageType="image/png"
+            webStyle={SIG_WEB_STYLE}
+          />
+        </View>
+        <View style={styles.sigFooter}>
+          <Pressable
+            testID="dyn-sig-clear"
+            onPress={() => ref.current?.clearSignature()}
+            style={styles.sigClearBtn}
+          >
+            <Ionicons name="refresh" size={16} color={theme.colors.brandPrimary} />
+            <Text style={styles.sigClearText}>Clear</Text>
+          </Pressable>
+          <Text style={styles.sigHint}>Draw with your finger. Tap Save when done.</Text>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// The signature canvas is a WebView under the hood; keep it visually clean.
+const SIG_WEB_STYLE = `
+  .m-signature-pad--footer { display: none; margin: 0; }
+  .m-signature-pad { box-shadow: none; border: none; }
+  body,html { margin:0; padding:0; background:#fff; }
+`;
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.background },
@@ -726,4 +1071,130 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   footerSubmitText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+
+  // ----- Phase 3 additions --------------------------------------------------
+  headerIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.16)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  inputError: {
+    borderColor: theme.colors.danger,
+    borderWidth: 1.5,
+  },
+  errorInline: {
+    color: theme.colors.danger,
+    fontSize: 11,
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  draftBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: theme.colors.brandTertiary,
+    borderWidth: 1,
+    borderColor: theme.colors.brandPrimary,
+  },
+  draftBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "600",
+    color: theme.colors.brandPrimary,
+  },
+  draftBannerAction: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: theme.colors.danger,
+    textDecorationLine: "underline",
+  },
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: "#fdecec",
+    borderWidth: 1,
+    borderColor: theme.colors.danger,
+  },
+  errorBannerText: {
+    color: theme.colors.danger,
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  signaturePlaceholderFilled: {
+    borderStyle: "solid",
+    backgroundColor: theme.colors.surface,
+    borderColor: theme.colors.success,
+  },
+  signaturePreviewRow: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  signatureCapturedLabel: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: theme.colors.onSurface,
+  },
+  signatureCapturedHint: {
+    fontSize: 11,
+    color: theme.colors.muted,
+    marginTop: 2,
+  },
+  // Signature capture sub-modal
+  sigRoot: { flex: 1, backgroundColor: "#000" },
+  sigHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: theme.colors.brandPrimary,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  sigTitle: {
+    flex: 1,
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  sigSaveBtn: {
+    backgroundColor: "#fff",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    minWidth: 76,
+    alignItems: "center",
+  },
+  sigSaveText: { color: theme.colors.brandPrimary, fontWeight: "700", fontSize: 13 },
+  sigCanvasWrap: { flex: 1, backgroundColor: "#fff" },
+  sigFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 12,
+    backgroundColor: "#f6f7fb",
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border,
+  },
+  sigClearBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: theme.colors.brandPrimary,
+  },
+  sigClearText: { color: theme.colors.brandPrimary, fontWeight: "700", fontSize: 12 },
+  sigHint: { fontSize: 11, color: theme.colors.muted, fontStyle: "italic" },
 });

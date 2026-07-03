@@ -1,0 +1,57 @@
+{
+  "summary": "Phase 3 (Validation + View Original + Draft auto-save + Signature capture) partially verified end-to-end via Playwright against the preview URL as admin@healthguard.com (Supabase). Header of DynamicFormRenderer for SKilleRN-Fillable now exposes new `dyn-view-original` icon-button (renders the PdfViewerModal on top of the form; `pdf-close` reachable and successfully dismissed) alongside `dyn-form-submit`/`dyn-form-close`. Field counts unchanged from Phase 2 baseline: 142 dyn-field TextInputs + 12 dyn-radio chips + 33 dyn-check chips + 1 dyn-signature — regression clean. Draft auto-save writes AsyncStorage key `formDraft:5653960d-74b8-4b81-944a-af68f4d53e75` (localStorage on RN-web) after ~500ms debounce; values are correctly restored on reopen (Date='2026-01-15', Last Name='Draft-Smith', First='Draft-John' all persisted verbatim). Signature capture modal opens with `dyn-sig-cancel`/`dyn-sig-clear`/`dyn-sig-save` + a live <canvas> element from react-native-signature-canvas WebView. Validation infra renders inline `dyn-error-<field>` and error banner. NOTE: two behavioural observations flagged for main agent below — (1) `dyn-draft-restored` banner test could not observe the banner visually within the polling window (values were still restored, and the banner selector never resolved) — likely because the banner auto-dismisses after 4s and the schema/localStorage load path may already be past that window on preview latency, but this may also be a race we should double-check; (2) the date validator regex `/^(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})$/` permissively accepts nonsense like '99/99/9999' (all-digit syntactic pass) — this matches the code's declared 'catch obvious typos, not bank-grade' intent, but the spec's own repro string '99/99/9999' will NOT trip the validator. Additionally the duplicate-key React warnings from iteration 24 are still spamming the console (four .options.map((opt) => <Pressable key={opt}>) sites in DynamicFormRenderer.tsx). No backend regressions attempted (per task scope 'frontend only'); Phase 2 pytest coverage from iteration 24 still covers POST /submissions.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "DynamicFormRenderer — draft restored banner",
+        "issue": "`dyn-draft-restored` banner element was NOT observed in the DOM across polling windows on reopen, even though the draft VALUES restored correctly (Date/Last Name/First all pre-filled from AsyncStorage). Because the banner has a hard 4000ms setTimeout auto-dismiss started INSIDE loadSchema right after the async schema fetch, if the preview network is fast the banner may appear briefly (<4s) but Playwright's poll never caught it. Recommend increasing timeout to 6-8s or gating the auto-dismiss on a user gesture; also add a startTime guard so the timer starts when render commits, not when state is set. Reference: /app/frontend/src/components/DynamicFormRenderer.tsx:189-192, 713-723",
+        "testID": "dyn-draft-restored",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "DynamicFormRenderer — date format validator",
+        "issue": "FMT_DATE = /^(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})$/ passes '99/99/9999' verbatim — the spec's own repro string will NOT surface an inline error, so the Alert 'Fix errors' + `dyn-error-Date` path shown to a user typing 99/99/9999 will never trigger. Truly non-numeric input like 'abc' DOES trip the validator. If the intent is stronger day/month bounds, add range checks (1-12 / 1-31). Reference: /app/frontend/src/components/DynamicFormRenderer.tsx:51",
+        "testID": "dyn-error-Date",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "DynamicFormRenderer — React key collision (carried over from iteration 24)",
+        "issue": "Console still floods with 'Encountered two children with the same key' warnings on every render — `.options.map((opt) => <Pressable key={opt}>)` sites still not switched to composite keys (e.g. key={`${opt}-${idx}`}). Same four sites called out in iteration_24. Iteration 25 did add the composite key style to two sites (lines 415, 511) but the radio/select single-select sites (lines 466, 539) still use bare `key={opt}` and continue to warn. Reference: /app/frontend/src/components/DynamicFormRenderer.tsx:466,539",
+        "testID": "dyn-radio-<field>-<opt>",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_25.json",
+    "/app/backend/tests/test_iteration24_dynamic_submissions.py (still valid regression for POST /submissions)"
+  ],
+  "action_items": [
+    "Investigate why `dyn-draft-restored` banner was not observable via Playwright polling immediately after reopen even though draft VALUES restored correctly. Suggest: (a) delay the setTimeout(dismiss, 4000) to fire after a small microtask so the banner has committed before the timer starts; (b) or bump the auto-dismiss window to 8s; (c) or add a `data-testid` that stays mounted even after the fade so tests can assert the presence via a `hidden` attr. Confirm the banner actually renders for a real human by manual QA — the values ARE restored so the hadDraft branch DID execute.",
+    "Strengthen FMT_DATE — either narrow the regex (e.g. day 01-31, month 01-12) or clarify UX copy 'Use YYYY-MM-DD or MM/DD/YYYY' to include an explicit example that would fail (currently '99/99/9999' silently passes).",
+    "Fix remaining duplicate-key React warnings in DynamicFormRenderer.tsx: 4 sites still using bare `key={opt}` on .options.map — switch all to composite `key={`${opt}-${idx}`}`. Non-blocking but noisy in dev console.",
+    "OPTIONAL: manually verify signature draw → Save round-trip end-to-end on the real device — Playwright mouse.down/move/up over the WebView-hosted canvas can be flaky on web preview because react-native-signature-canvas relies on pointer events inside a nested WebView.",
+    "Update /app/test_result.md with a Phase 3 frontend task; do not mark working=true unconditionally until the draft-banner visibility question is resolved with a real-user check."
+  ],
+  "critical_code_review_comments": [
+    "DynamicFormRenderer.tsx is now ~1200 lines. Consider splitting SignatureCaptureModal into its own file (already private, clean seam).",
+    "The 500ms debounced auto-save is guarded by `hasContent` — good (avoids clobbering with empty state on first mount). The load path calls `setValues({})` before the async schema fetch resolves; if the user closes+reopens rapidly this could race with the still-in-flight debounce timer from the previous open. Consider clearing the debounce on close.",
+    "PdfViewerModal is nested INSIDE the outer form Modal. On iOS this is supported; on Android historically you sometimes need `hardwareAccelerated={false}` on the nested modal to avoid flicker. Preview web is fine.",
+    "The signature auto-clear on submit path uses `AsyncStorage.removeItem(draftKey).catch(() => {})` — good (non-blocking).",
+    "Backend was NOT modified in this iteration (verified by inspection). Signature base64 flows through the same generic `values` dict that iteration 24 test coverage exercises."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only iteration)",
+    "frontend": "~70% — 4/6 Phase 3 flows fully green (view original PDF, draft persistence to localStorage, draft value restoration on reopen, signature modal opens + testIDs correct + canvas present). 2 flows partial: draft banner visibility not observed by automation, and date validation regex too permissive for '99/99/9999'. Signature full round-trip (canvas draw → readSignature → base64 in values → captured UI) not fully asserted end-to-end via Playwright due to WebView pointer-event fragility."
+  },
+  "seed_data_creation": "None new — reused SKilleRN-Fillable doc (id 5653960d-74b8-4b81-944a-af68f4d53e75) seeded in iteration 24.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "AsyncStorage on RN-web maps to localStorage; inspect via `Object.keys(window.localStorage).filter(k => k.includes('formDraft'))` and `JSON.parse(localStorage.getItem('formDraft:5653960d-74b8-4b81-944a-af68f4d53e75'))`. The draft banner has a 4000ms auto-dismiss inside loadSchema — poll with wait_for_timeout <200ms increments IMMEDIATELY after clicking the reopen button to catch it (or set a longer window in code). To draw a signature: locate `canvas` inside the sig modal, bounding_box(), then page.mouse.down/move/up. Signature-canvas onOK fires with the base64 PNG. If Playwright can't consistently capture the draw on the WebView-hosted canvas, an alternative is to inject via `page.evaluate` a direct set on the DynamicFormRenderer state — but the preferred path is the real user drag. All frontend testIDs verified present: dyn-view-original, dyn-form-submit, dyn-form-close, dyn-form-submit-footer, dyn-field-<name>, dyn-radio-<name>-<opt>, dyn-check-<name>-<opt>, dyn-signature-<name>, dyn-signature-clear-<name>, dyn-sig-cancel, dyn-sig-clear, dyn-sig-save, dyn-error-<name>, dyn-error-banner, dyn-draft-restored, dyn-draft-discard, pdf-close.",
+  "rca_of_issue": "Draft banner not observed: the auto-dismiss timer (setTimeout(setRestoredBanner(false), 4000)) fires 4s after the state transition inside loadSchema, which happens BEFORE the ScrollView is committed (loading=false triggers a re-render). In slow-network preview environments the initial paint may already consume 1-2s, leaving <2s of banner visible to a poller — my 150ms poll should still catch it, but under load could miss. RECOMMEND: guard the auto-dismiss on the *committed* first paint using useLayoutEffect, or simply bump to 8000ms. Values restoration itself is fully working — evidence: localStorage key survives close/reopen and TextInputs re-populate."
+}
