@@ -216,6 +216,72 @@ backend:
           for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
 
 frontend:
+  - task: "Phase 2 — DynamicFormRenderer + wire-up (legacy form preserved as rollback)"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/components/DynamicFormRenderer.tsx, /app/frontend/src/components/_LegacyEmploymentForm.tsx, /app/frontend/app/(tabs)/documents.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Phase 2 frontend feature (frontend Phase 2 only; Phase 1 backend
+          parser + /schema endpoint untouched per user directive).
+
+          FILES:
+          1. RENAMED /app/frontend/src/components/FillableFormModal.tsx →
+             /app/frontend/src/components/_LegacyEmploymentForm.tsx. Kept
+             `export function FillableFormModal` symbol for rollback via
+             re-import. NOT wired into any screen anymore. Docstring at the
+             top warns "Preserved as a rollback for Phase 2".
+          2. NEW /app/frontend/src/components/DynamicFormRenderer.tsx —
+             schema-driven Modal component (React Native primitives only,
+             no HTML, no web form libs). Props:
+               { documentId, documentTitle?, visible, onClose, onSubmitted? }
+             Fetches GET /api/documents/{documentId}/schema via
+             getAuthHeaders(). Field-type mapping matches spec:
+                text     → <TextInput>
+                checkbox → <Switch> (single) or pressable multi-option
+                          group when field.options is populated
+                radio    → pressable radio group driven by field.options
+                          (defaults to Yes/No when no options)
+                combobox → pressable single-select chips
+                listbox  → pressable multi-select chips
+                signature→ "Signature capture coming soon" placeholder
+                          (stores no value; Phase 3)
+                button   → skipped entirely
+             State: single useState({}) keyed by field_name. No external
+             state library. Wrapped in ScrollView + KeyboardAvoidingView.
+             Fields grouped by page with a "Page N of M" pill and a
+             per-page field count. Header shows total field count. Submit
+             button POSTs current state to POST /api/documents/{id}/submissions
+             (both header and footer submit for reachability on long forms).
+             Handles empty/error/loading states cleanly.
+          3. WIRED /app/frontend/app/(tabs)/documents.tsx:
+                - Import switched from FillableFormModal to
+                  DynamicFormRenderer + (legacy) FillableFormModal from
+                  the renamed rollback file. Legacy rendered inside
+                  `{false && ...}` guard so the module stays reachable but
+                  never mounts.
+                - Added a "Fill" button (create-outline icon,
+                  testID `fill-doc-<id>`) next to the eye-icon "View"
+                  button on every doc card with a file. Tapping it opens
+                  the DynamicFormRenderer for that document. The empty
+                  state is graceful for PDFs without detectable fields.
+                - Legacy tap-on-card behaviour for hardcoded fillable
+                  titles (FILLABLE_TITLES) still triggers the same
+                  setFormDoc — but now it opens the dynamic renderer
+                  instead of the legacy form.
+
+          VERIFICATION LOCALLY:
+            • Backend POST /api/documents/{seedDoc}/submissions → 201, row
+              in Mongo `submissions` collection with matching document_id.
+            • lint clean on both new/renamed frontend files.
+            • Backend/frontend both healthy after restart.
+          Not yet verified end-to-end via testing_agent (called next).
+
   - task: "PDF viewer + auth helpers — use Supabase JWT, not stale legacy userToken"
     implemented: true
     working: "NA"
@@ -604,3 +670,72 @@ agent_communication:
       No backend regressions observed. requirements.txt already contains
       pymupdf==1.28.0 and reportlab==5.0.0. Frontend intentionally not touched.
       Phase 1 backend can be marked complete.
+
+  - agent: "testing"
+    message: |
+      Iteration 24 — Phase 2 (POST /api/documents/{id}/submissions + DynamicFormRenderer)
+      end-to-end verification: **BACKEND 8/8 pytest PASS + FRONTEND UI green.**
+      Test file: /app/backend/tests/test_iteration24_dynamic_submissions.py
+      JUnit: /app/test_reports/pytest/iteration24_results.xml
+
+      Backend coverage:
+        • POST /submissions with 3 populated values against seeded doc
+          16745d1d-22a7-4912-adbf-acc588192a01 → 201
+          {id, document_id, submitted_at, field_count:3} — PASS
+        • POST with values={} → 201 field_count=0 — PASS
+        • Unknown document id → 404 detail "Document not found" — PASS
+        • Missing bearer token → 403 — PASS
+        • Optional signature_b64 accepted and stored verbatim in Mongo — PASS
+        • Mongo `submissions` row exists with matching id and shape
+          {document_id, document_title, submitted_by, submitter_email,
+           submitter_role, values, signature_b64, submitted_at} — PASS
+        • signature_b64 stored as null when omitted — PASS
+        • REGRESSION: GET /api/documents/{seededDoc}/schema still returns
+          valid envelope (field_count=27, source=acroform, parser_version=1.0) — PASS
+
+      Frontend coverage (Supabase login admin@healthguard.com):
+        • Login → Documents tab → SKilleRN-Fillable.pdf card shows THREE
+          icons (view / fill-doc / push / delete) as expected — PASS
+        • fill-doc-<id> tap opens Modal with header "SKilleRN-Fillable",
+          subtitle "182 fields · 4 pages", Submit button (dyn-form-submit)
+          and "PAGE 1 OF 4" pill visible — PASS
+        • Modal renders 142 dyn-field TextInputs, 12 dyn-radio chips,
+          33 dyn-check chips, and 1 "Signature capture coming soon" placeholder — PASS
+        • Fill 3 TextInputs (Date/Last Name/First), toggle 1 checkbox,
+          select 1 radio → tap dyn-form-submit → POST /submissions 201 →
+          Modal closes; Mongo row confirms values persisted
+          (Date=2026-07-03, Last Name=Smith, First=John,
+           "Are you legally qualified…"=true, radio="Yes") — PASS
+        • REGRESSION: react-native primitives only — no <input>, <form>,
+          <div>, <span>, react-router-dom, @mui, tailwindcss, framer-motion
+          in DynamicFormRenderer.tsx — PASS (grep clean)
+        • REGRESSION: _LegacyEmploymentForm.tsx preserved, exports
+          FillableFormModal, docstring warns "Do NOT delete", rendered
+          only inside `{false && (...)}` guard in documents.tsx — PASS
+        • KeyboardAvoidingView + ScrollView wired at DynamicFormRenderer:434 — PASS
+        • eye-icon PdfViewerModal on doc cards still works (regression) — PASS
+
+      Minor issue (non-blocking, main agent):
+        1. React key-collision warnings ("Encountered two children with
+           the same key") logged repeatedly when the modal is mounted for
+           SKilleRN-Fillable. The state key uses `field_name` which is
+           already deduped server-side ("YES", "YES_2", …), so the outer
+           <View key={f.field_name}> is unique — the duplicate keys are
+           inside f.options.map((opt) => <Pressable key={opt}>) when a
+           schema field has repeated option strings (e.g. two identical
+           "YES" options). Suggest key={`${opt}-${idx}`}. Not a functional
+           bug — form still submits and values persist correctly.
+
+      Divergence from spec (non-blocking):
+        2. Metadata-only doc case in the test list ("Tap fill-doc-<id>
+           on a metadata-only doc, no PDF, e.g. '02 - HIPAA Privacy Policy'")
+           is not reachable via UI because the fill-doc button in
+           documents.tsx is gated by `hasFile` (line 382). This is by
+           design (matches the eye-icon "view" button gating) and any
+           PDF that lacks fields still shows the graceful empty state
+           "No fillable fields were detected in this PDF" via the
+           renderer, verified against uploaded PNG-only test docs in
+           iteration 23. Leaving as-is.
+
+      test_result.md updated: Phase 2 frontend task marked working=true
+      needs_retesting=false.

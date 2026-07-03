@@ -8,6 +8,7 @@ import SignatureScreen from "react-native-signature-canvas";
 import { apiGet, apiPost } from "@/src/api/client";
 import { theme } from "@/src/theme";
 
+
 type Field = {
   key: string; label: string;
   type: "text" | "longtext" | "date" | "number" | "money" |
@@ -26,6 +27,20 @@ type Props = {
   onSubmitted?: () => void;
 };
 
+/**
+ * _LegacyEmploymentForm — the pre-Phase-2 fillable form modal.
+ *
+ * This component drives the hardcoded schemas served by
+ * GET /api/documents/{id}/form-schema (see backend/form_schemas.py) and
+ * covers the original 5 native-fillable docs
+ * (Employment Application, Client Authorization, Auto Release,
+ *  Direct Deposit, Emergency Contact).
+ *
+ * Preserved as a rollback for Phase 2. Not imported by any screen anymore;
+ * see DynamicFormRenderer.tsx for the new schema-driven renderer that reads
+ * /api/documents/{id}/schema. Do NOT delete — if the dynamic renderer needs
+ * to be reverted, re-import { FillableFormModal } from this file.
+ */
 export function FillableFormModal({ visible, docId, docTitle, onClose, onSubmitted }: Props) {
   const [schema, setSchema] = useState<Schema | null>(null);
   const [values, setValues] = useState<Record<string, any>>({});

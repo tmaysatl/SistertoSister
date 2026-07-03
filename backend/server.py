@@ -10,7 +10,7 @@ import logging
 import tempfile
 from urllib.parse import quote as _urlquote
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 import uuid
 from datetime import datetime, timedelta, timezone
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
@@ -742,6 +742,66 @@ async def get_document_schema(document_id: str,
             }
     row.pop("_id", None)
     return row
+
+
+# ----- Dynamic form submissions (Phase 2) -----------------------------------
+class DynamicSubmissionCreate(BaseModel):
+    """Payload for POST /documents/{document_id}/submissions.
+
+    `values` is an untyped dict keyed by the schema's `field_name`. Values
+    may be strings, booleans, numbers, or arrays for multi-select fields —
+    we do not enforce a shape here because the schema itself is dynamic.
+    Optional `signature_b64` reserved for future phases; ignored for now.
+    """
+    values: Dict[str, Any] = Field(default_factory=dict)
+    signature_b64: Optional[str] = None
+
+
+@api.post("/documents/{document_id}/submissions", status_code=201)
+async def create_document_submission(
+    document_id: str,
+    payload: DynamicSubmissionCreate,
+    current: UserPublic = Depends(get_current_user),
+):
+    """Persist a filled-form submission for `document_id`.
+
+    Stored in the `submissions` collection with shape:
+        {
+          id, document_id, submitted_by, submitter_email,
+          values, signature_b64, submitted_at,
+        }
+    Returns the created submission id and a snapshot of `field_count`
+    (the number of populated fields, for the client's confirmation UI).
+    """
+    doc = await db.documents.find_one({"id": document_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    sub = {
+        "id": str(uuid.uuid4()),
+        "document_id": document_id,
+        "document_title": doc.get("title"),
+        "submitted_by": current.id,
+        "submitter_email": current.email,
+        "submitter_role": current.role,
+        "values": payload.values or {},
+        "signature_b64": payload.signature_b64,
+        "submitted_at": now_iso(),
+    }
+    await db.submissions.insert_one(sub)
+    populated = sum(
+        1 for v in (payload.values or {}).values()
+        if v not in (None, "", [], {}, False)
+    )
+    return {
+        "id": sub["id"],
+        "document_id": document_id,
+        "submitted_at": sub["submitted_at"],
+        "field_count": populated,
+    }
+
+
+
 
 
 @api.get("/documents", response_model=List[Document])

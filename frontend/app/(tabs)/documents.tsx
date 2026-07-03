@@ -13,7 +13,8 @@ import { apiGet, apiPost, apiDelete } from "@/src/api/client";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 import { MicrosoftIntegrationCard } from "@/src/components/MicrosoftIntegrationCard";
 import { ReplicationKitCard } from "@/src/components/ReplicationKitCard";
-import { FillableFormModal } from "@/src/components/FillableFormModal";
+import { FillableFormModal } from "@/src/components/_LegacyEmploymentForm";
+import DynamicFormRenderer from "@/src/components/DynamicFormRenderer";
 import { theme } from "@/src/theme";
 
 type DocCategory = "client" | "caregiver" | "client_onboarding" | "caregiver_onboarding" | "credential" | "training" | "policy";
@@ -373,6 +374,21 @@ export default function Documents() {
                   <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
                 </Pressable>
               )}
+              {/* Phase 2: any PDF can be opened as a dynamic form. The
+                  DynamicFormRenderer will show an empty state if the PDF has
+                  no detectable fields, so this button is safe to always show
+                  for files. Kept separate from the eye-icon "View" button
+                  so users can choose between preview vs. fill. */}
+              {hasFile && (
+                <Pressable
+                  testID={`fill-doc-${item.id}`}
+                  onPress={(e) => { e.stopPropagation(); setFormDoc(item); }}
+                  hitSlop={10}
+                  style={styles.viewBtn}
+                >
+                  <Ionicons name="create-outline" size={18} color={theme.colors.brandPrimary} />
+                </Pressable>
+              )}
               {user?.role === "admin" && hasFile && (
                 <Pressable
                   testID={`push-doc-${item.id}`}
@@ -621,14 +637,28 @@ export default function Documents() {
         path={showBinder ? "/reports/audit-binder" : null}
       />
 
-      {/* Native fillable form (5 client + caregiver docs with schemas) */}
-      <FillableFormModal
+      {/* Phase 2: schema-driven form renderer.
+          Fetches /api/documents/{id}/schema and renders one input per field.
+          Replaces the legacy hardcoded FillableFormModal (kept as
+          _LegacyEmploymentForm.tsx for rollback). */}
+      <DynamicFormRenderer
         visible={!!formDoc}
-        docId={formDoc?.id ?? null}
-        docTitle={formDoc?.title ?? ""}
+        documentId={formDoc?.id ?? null}
+        documentTitle={formDoc?.title ?? ""}
         onClose={() => setFormDoc(null)}
         onSubmitted={() => { setFormDoc(null); load(); }}
       />
+      {/* Legacy import — intentionally unused but kept so the symbol is
+          reachable via tree-shaking bypass and code editors keep the
+          rollback path warm. */}
+      {false && (
+        <FillableFormModal
+          visible={false}
+          docId={null}
+          docTitle=""
+          onClose={() => { }}
+        />
+      )}
 
       {/* Push document to user(s) modal */}
       <Modal visible={!!pushDoc} transparent animationType="slide" onRequestClose={() => setPushDoc(null)}>
