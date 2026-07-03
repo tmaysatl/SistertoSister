@@ -16,9 +16,11 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { API_BASE, getAuthHeaders } from "@/src/api/client";
 import { theme } from "@/src/theme";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
+import { HEADER_CONTENT_HEIGHT } from "@/src/components/ScreenHeader";
 
 /**
  * DynamicFormRenderer — Phase 2 (baseline) + Phase 3 (validation, view
@@ -119,6 +121,12 @@ export default function DynamicFormRenderer({
   onClose,
   onSubmitted,
 }: Props) {
+  // Phase 4 — safe-area handling for the modal presentation. This modal is
+  // presented on top of the whole app, so it does NOT inherit the parent's
+  // top inset — we must reserve `insets.top` inside the coloured header
+  // ourselves. `insets.bottom` is pushed onto the ScrollView content so
+  // the footer submit button never sits under the home indicator.
+  const insets = useSafeAreaInsets();
   const [envelope, setEnvelope] = useState<SchemaEnvelope | null>(null);
   const [values, setValues] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
@@ -638,7 +646,15 @@ export default function DynamicFormRenderer({
         style={styles.root}
         keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
       >
-        <View style={styles.header}>
+        <View
+          style={[
+            styles.header,
+            {
+              paddingTop: insets.top,
+              height: HEADER_CONTENT_HEIGHT + insets.top,
+            },
+          ]}
+        >
           <Pressable onPress={onClose} hitSlop={10} testID="dyn-form-close">
             <Ionicons name="close" size={24} color="#fff" />
           </Pressable>
@@ -707,7 +723,10 @@ export default function DynamicFormRenderer({
         ) : (
           <ScrollView
             keyboardShouldPersistTaps="handled"
-            contentContainerStyle={styles.scrollContent}
+            contentContainerStyle={[
+              styles.scrollContent,
+              { paddingBottom: 60 + insets.bottom },
+            ]}
           >
             {/* Phase 3 — draft restored banner (auto-hides after 4s). */}
             {restoredBanner ? (
@@ -807,6 +826,10 @@ type SigProps = {
 function SignatureCaptureModal({ visible, fieldLabel, initial, onClose, onSave }: SigProps) {
   const ref = useRef<SignatureViewRef>(null);
   const [saving, setSaving] = useState(false);
+  // Same modal-safe-area concern: reserve insets on the coloured header
+  // and add insets.bottom padding to the footer so nothing sits under
+  // the home indicator.
+  const insets = useSafeAreaInsets();
 
   const handleOK = (b64: string) => {
     setSaving(false);
@@ -826,7 +849,15 @@ function SignatureCaptureModal({ visible, fieldLabel, initial, onClose, onSave }
       onRequestClose={onClose}
     >
       <View style={styles.sigRoot}>
-        <View style={styles.sigHeader}>
+        <View
+          style={[
+            styles.sigHeader,
+            {
+              paddingTop: insets.top,
+              height: HEADER_CONTENT_HEIGHT + insets.top,
+            },
+          ]}
+        >
           <Pressable onPress={onClose} hitSlop={10} testID="dyn-sig-cancel">
             <Ionicons name="close" size={22} color="#fff" />
           </Pressable>
@@ -857,7 +888,7 @@ function SignatureCaptureModal({ visible, fieldLabel, initial, onClose, onSave }
             webStyle={SIG_WEB_STYLE}
           />
         </View>
-        <View style={styles.sigFooter}>
+        <View style={[styles.sigFooter, { paddingBottom: 12 + insets.bottom }]}>
           <Pressable
             testID="dyn-sig-clear"
             onPress={() => ref.current?.clearSignature()}

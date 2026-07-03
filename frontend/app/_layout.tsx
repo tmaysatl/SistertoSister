@@ -87,7 +87,19 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AuthProvider>
-          <StatusBar style="dark" />
+          {/*
+            Status bar: text/icons are `light` because most app headers
+            (dashboard hero, form modals, PDF viewer) use the brand dark-
+            green background. On Android we also mark the status bar
+            translucent so content flows edge-to-edge and the
+            `useSafeAreaInsets().top` measurement remains accurate; the
+            individual screen headers reserve that inset via ScreenHeader.
+          */}
+          <StatusBar
+            style="light"
+            translucent
+            backgroundColor="transparent"
+          />
           <RootGate />
         </AuthProvider>
       </SafeAreaProvider>

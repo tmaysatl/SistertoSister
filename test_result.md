@@ -216,6 +216,78 @@ backend:
           for /api/ms/status reads. Smoke test _smoke_slice_j.py PASSES.
 
 frontend:
+  - task: "Safe-area / status-bar overlap fix on Modal-based screens (root StatusBar + ScreenContainer/ScreenHeader helpers + DynamicFormRenderer/SignatureCaptureModal patched)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/_layout.tsx, /app/frontend/src/components/ScreenContainer.tsx, /app/frontend/src/components/ScreenHeader.tsx, /app/frontend/src/components/DynamicFormRenderer.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          USER REPORT: Status bar (time / wifi / battery / return chip) is
+          overlapping the app header on iOS. App is not reserving the top
+          safe-area inset. Fix must be at the root, not per-screen.
+
+          INVESTIGATION:
+          - Deps already installed (react-native-safe-area-context 5.6.0,
+            expo-status-bar 3.0.9).
+          - `SafeAreaProvider` already wraps app root in _layout.tsx.
+          - No `SafeAreaView` is imported from `react-native` anywhere —
+            all screens already use the correct one from `react-native-safe-area-context`.
+          - Every TAB SCREEN correctly wraps its content in
+            `<SafeAreaView edges={["top"]}>` — those work.
+          - BUG SOURCE: The Modal-based screens (DynamicFormRenderer and
+            its inner SignatureCaptureModal) put their coloured green
+            header at y=0 with NO inset reservation. React Native Modals
+            are a separate presentation context on iOS and do NOT inherit
+            the parent's inset — hence the overlap.
+          - Root StatusBar was set to `style="dark"` — unreadable text over
+            the dark-green header on iOS.
+
+          FIX:
+          1. `/app/frontend/app/_layout.tsx`
+               `<StatusBar style="dark" />` → `<StatusBar style="light" translucent backgroundColor="transparent" />`.
+               Documented rationale inline.
+          2. NEW `/app/frontend/src/components/ScreenContainer.tsx`
+               Shared root wrapper. Uses `SafeAreaView` from
+               `react-native-safe-area-context` with `edges={['top','left','right']}`
+               by default. Available for any future screen so we don't
+               duplicate the pattern per file.
+          3. NEW `/app/frontend/src/components/ScreenHeader.tsx`
+               Reusable coloured header component that reserves `insets.top`.
+               Exports `HEADER_CONTENT_HEIGHT = 52`. Total header height =
+               `HEADER_CONTENT_HEIGHT + insets.top`. Content row is
+               vertically centered BELOW the inset.
+          4. `/app/frontend/src/components/DynamicFormRenderer.tsx`
+               - Imports `useSafeAreaInsets` from `react-native-safe-area-context`
+                 and `HEADER_CONTENT_HEIGHT` from ScreenHeader.
+               - Main modal header now uses
+                 `{paddingTop: insets.top, height: HEADER_CONTENT_HEIGHT + insets.top}`.
+                 Title and Submit sit below the inset, vertically centered.
+               - Main modal ScrollView content now uses
+                 `paddingBottom: 60 + insets.bottom` so the footer submit
+                 button never sits under the home indicator.
+               - Signature capture sub-modal: same header treatment, plus
+                 `paddingBottom: 12 + insets.bottom` on its footer.
+
+          NOT TOUCHED (intentional):
+          - PdfViewerModal already correctly wraps in
+            `<SafeAreaView edges={["top"]}>` — inset is respected.
+          - Tab screens already wrap in `<SafeAreaView edges={["top"]}>` from
+            `react-native-safe-area-context` — inset is respected.
+          - `_LegacyEmploymentForm.tsx` remains as-is (rollback path, not
+            mounted).
+
+          Android: `app.json` already declares `edgeToEdgeEnabled: true`,
+          which combined with root `<StatusBar translucent>` gives the
+          expected inset behaviour and keeps content out from under the
+          status bar / gesture handle.
+
+          Lint clean on all 4 files. Not yet verified via testing_agent.
+
   - task: "Phase 2 — DynamicFormRenderer + wire-up (legacy form preserved as rollback)"
     implemented: true
     working: true
