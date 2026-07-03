@@ -108,6 +108,67 @@ user_problem_statement: |
   Dual-write pattern keeps Mongo authoritative until Phase 7 cutover.
 
 backend:
+  - task: "Phase 1 — PDF field extraction pipeline (pdf_parser.py + upload hook + /schema)"
+    implemented: true
+    working: true
+    file: "/app/backend/pdf_parser.py, /app/backend/server.py, /app/backend/requirements.txt"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Phase 1 backend-only feature. Frontend NOT touched.
+
+          NEW MODULE `/app/backend/pdf_parser.py` exports 3 functions:
+            • extract_acroform_fields(pdf_path) — walks pymupdf page.widgets()
+              on every page, returns
+              [{field_name, field_type, page (1-idx), position:{x0,y0,x1,y1},
+                options, required, value, source:'acroform'}, ...]
+              field_type normalises pymupdf's field_type_string to one of
+              text | checkbox | radio | combobox | listbox | signature | button.
+              For choice fields, `choice_values` is unpacked into options.
+              Empty list when the PDF has no widget annotations.
+            • extract_fields_from_text(pdf_path) — text fallback for flat PDFs.
+              Regex `_LABEL_UNDERSCORE_RE` catches "Label: ______" AND
+              "Label ______" AND grouped date runs like "D.O.B ___/___/___".
+              Checkbox markers ("☐","□","[ ]","hh ") emit type=checkbox with
+              options=['YES','NO'] when those tokens appear on the line.
+              Duplicates deduplicated via "Name (2)", "Name (3)", ...
+              Position approximated via page.search_for(label).
+            • parse_pdf(pdf_path) — top-level. Tries AcroForm, falls back to
+              text extraction if empty. Never raises.
+
+          NEW DB COLLECTION `field_schemas` keyed by document_id with shape:
+            {document_id, fields, field_count, source, extracted_at, parser_version}
+
+          UPLOAD HOOK — POST /api/documents now calls
+          _extract_and_store_schema() after the Mongo insert + Postgres mirror.
+          Writes the base64 blob to a NamedTemporaryFile, runs parse_pdf,
+          upserts the schema row. Best-effort; parse failures never block
+          the upload response (logged only).
+
+          NEW ENDPOINT — GET /api/documents/{document_id}/schema returns the
+          cached schema. If no cached row exists (older doc that pre-dates
+          this feature), lazily backfills from the stored file_base64 on
+          first read so historical docs also get a schema. Returns 404 only
+          when the parent document is missing. For non-PDFs / PDFs with zero
+          detectable fields, returns the empty envelope
+          {..., fields: [], field_count: 0, source: 'empty'}.
+
+          DEPENDENCIES:
+            • pymupdf==1.28.0 installed via `pip install pymupdf`
+            • added to /app/backend/requirements.txt
+
+          END-TO-END SMOKE PASS (`SKilleRN-Fillable.pdf`, 289 KB):
+            • Upload → 200 OK
+            • GET /schema → 200, field_count=182, source=acroform
+              (142 text, 33 checkbox, 6 radio, 1 signature)
+            • Bogus doc id → 404 Document not found
+            • Mongo `field_schemas` row present with matching field_count
+            • Delete cleaned up both stores.
+
   - task: "PDF stamped endpoint — Unicode-safe Content-Disposition (Latin-1 crash)"
     implemented: true
     working: "NA"
@@ -505,3 +566,41 @@ agent_communication:
       Admin Legacy creds:   admin@healthguard.com / Admin@123
       Caregiver Supabase:   caregiver@healthguard.com / Caregiver123!
       Caregiver Legacy:     caregiver@healthguard.com / Caregiver@123
+
+  - agent: "testing"
+    message: |
+      Iteration 23 — Phase 1 backend PDF field extraction: **ALL 21 pytest cases PASS** (100%).
+      Test file: /app/backend/tests/test_iteration23_pdf_field_extraction.py
+      JUnit report: /app/test_reports/pytest/iteration23_results.xml
+
+      Coverage vs. spec:
+        • Module imports (extract_acroform_fields / extract_fields_from_text / parse_pdf) — PASS
+        • parse_pdf on SKilleRN-Fillable.pdf → 182 fields, all keys present,
+          types = {text, checkbox, radio, signature}, positions valid rects,
+          every source == "acroform", "Last Name" text field found on page 1 — PASS
+        • extract_acroform_fields == parse_pdf (AcroForm path preferred) — PASS
+        • Flat-PDF fallback (pymupdf-generated /tmp/flat.pdf) — widgets empty,
+          text-heuristic returns Full Name + Date of Birth as text with
+          source='text-heuristic', parse_pdf falls back correctly — PASS
+        • Upload hook (POST /api/documents with PDF base64) → 200 + Mongo
+          field_schemas row with field_count=182 source='acroform' — PASS
+        • GET /api/documents/{id}/schema → 200 envelope {document_id,
+          field_count=182, source='acroform', fields[...], extracted_at,
+          parser_version='1.0'} — every field has field_name/field_type/page/
+          position{x0,y0,x1,y1}/options[list]/required[bool]/value/source — PASS
+        • GET /api/documents/does-not-exist-123/schema → 404 with detail
+          "Document not found" — PASS
+        • GET /schema without bearer token → 401 (get_current_user) — PASS
+        • Lazy backfill: delete Mongo field_schemas row → re-GET still 200
+          with field_count=182 (re-extracted from file_base64) — PASS
+        • Non-PDF (image/png) doc → GET /schema returns 200 field_count=0
+          source='empty' (no 500 crash) — PASS
+        • Regression: /api/documents/{seeded 01-employment}/form-schema
+          still 200 has_form=true schema present; /schema endpoint is
+          separate and does not shadow /form-schema — PASS
+        • Metadata-only POST (no file_base64) → 200, no crash — PASS
+        • DELETE /api/documents/{id} → 200 — PASS
+
+      No backend regressions observed. requirements.txt already contains
+      pymupdf==1.28.0 and reportlab==5.0.0. Frontend intentionally not touched.
+      Phase 1 backend can be marked complete.

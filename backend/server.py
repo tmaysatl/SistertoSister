@@ -7,6 +7,7 @@ import re
 import asyncio
 import base64
 import logging
+import tempfile
 from urllib.parse import quote as _urlquote
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Literal
@@ -28,6 +29,7 @@ from core import supa_data
 from core.push import send_push, _push_client
 from core.settings import EMERGENT_LLM_KEY
 from core.pdf_utils import _load_logo, _make_watermark, stamp_pdf
+from pdf_parser import parse_pdf as _parse_pdf_fields
 
 
 def _safe_disposition(filename: str, mode: str = "inline") -> str:
@@ -607,6 +609,57 @@ async def _build_audit_binder_bytes(client_id: Optional[str] = None,
 
 
 # ---------- DOCUMENTS ----------
+async def _extract_and_store_schema(doc_id: str, file_base64: str,
+                                    mime_type: Optional[str]) -> int:
+    """Run the pdf_parser on the uploaded PDF and upsert the field schema
+    into MongoDB (collection `field_schemas`, key = document_id).
+
+    Returns the number of fields extracted (0 if the file isn't a PDF, if
+    parsing raised, or if the PDF has no detectable fields). Never
+    propagates parse errors — extraction failures must not block uploads.
+    """
+    mime = (mime_type or "application/pdf").lower()
+    if "pdf" not in mime:
+        return 0
+    try:
+        raw = base64.b64decode(file_base64)
+    except Exception as e:
+        logger.warning("field-schema: base64 decode failed for %s: %s", doc_id, e)
+        return 0
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f"schema_{doc_id}_",
+                                         suffix=".pdf", delete=False) as fp:
+            fp.write(raw)
+            tmp_path = fp.name
+        fields = _parse_pdf_fields(tmp_path)
+    except Exception as e:
+        logger.warning("field-schema: parse failed for %s: %s", doc_id, e)
+        fields = []
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    try:
+        await db.field_schemas.update_one(
+            {"document_id": doc_id},
+            {"$set": {
+                "document_id": doc_id,
+                "fields": fields,
+                "field_count": len(fields),
+                "source": (fields[0].get("source") if fields else "empty"),
+                "extracted_at": now_iso(),
+                "parser_version": "1.0",
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning("field-schema: mongo upsert failed for %s: %s", doc_id, e)
+    return len(fields)
+
+
 @api.post("/documents", response_model=Document)
 async def create_document(req: DocumentCreate,
                           current: UserPublic = Depends(get_current_user)):
@@ -625,7 +678,70 @@ async def create_document(req: DocumentCreate,
     d_for_pg = obj.dict()
     d_for_pg["storage_path"] = storage_path
     await supa_data.upsert_document(d_for_pg)
+    # Phase-1 PDF field extraction: parse widget/text fields, persist schema
+    # in Mongo (`field_schemas` collection). Best-effort — never blocks the
+    # upload response on a parse failure.
+    if obj.file_base64:
+        try:
+            n = await _extract_and_store_schema(
+                obj.id, obj.file_base64, obj.mime_type,
+            )
+            logger.info("field-schema: extracted %d field(s) for %s", n, obj.id)
+        except Exception as e:  # defensive — helper is already try/except
+            logger.warning("field-schema: extract_and_store failed: %s", e)
     return obj
+
+
+@api.get("/documents/{document_id}/schema")
+async def get_document_schema(document_id: str,
+                              current: UserPublic = Depends(get_current_user)):
+    """Return the auto-extracted PDF field schema for `document_id`.
+
+    Response shape:
+        {
+          "document_id": str,
+          "field_count": int,
+          "source": "acroform" | "text-heuristic" | "empty",
+          "fields": [ { field_name, field_type, page, position, options,
+                        required, value, source }, ... ],
+          "extracted_at": iso8601,
+          "parser_version": "1.0",
+        }
+
+    If the schema was never extracted (e.g. the document was uploaded
+    before this feature shipped), a lazy re-extraction is attempted from
+    the stored `file_base64` blob so old rows also get a schema on first
+    access. If the doc is not a PDF or has no fields, `fields` will be [].
+    """
+    doc = await db.documents.find_one({"id": document_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    row = await db.field_schemas.find_one({"document_id": document_id})
+    if row is None:
+        # Lazy backfill on first read — keeps this endpoint 200 for docs
+        # that pre-date the auto-extraction hook.
+        if doc.get("file_base64"):
+            try:
+                await _extract_and_store_schema(
+                    document_id, doc["file_base64"], doc.get("mime_type"),
+                )
+                row = await db.field_schemas.find_one({"document_id": document_id})
+            except Exception as e:
+                logger.warning("field-schema: lazy backfill failed for %s: %s",
+                               document_id, e)
+        if row is None:
+            # No blob and no cached schema — return the empty envelope.
+            row = {
+                "document_id": document_id,
+                "fields": [],
+                "field_count": 0,
+                "source": "empty",
+                "extracted_at": now_iso(),
+                "parser_version": "1.0",
+            }
+    row.pop("_id", None)
+    return row
 
 
 @api.get("/documents", response_model=List[Document])
