@@ -115,10 +115,15 @@ class TestModuleImports:
 
 # ---------- 2. parser unit — AcroForm ----------
 class TestParserAcroForm:
-    def test_parse_pdf_returns_182_fields(self, sample_pdf_path):
+    def test_parse_pdf_returns_179_fields(self, sample_pdf_path):
         fields = parse_pdf(sample_pdf_path)
         assert isinstance(fields, list)
-        assert len(fields) == 182
+        # 179 distinct fields. The PDF has 182 widgets, but 3 Yes/No radio
+        # groups each expose 2 option-widgets sharing one field_name; the
+        # parser groups those into a single field per group.
+        assert len(fields) == 179
+        names = [f["field_name"] for f in fields]
+        assert len(names) == len(set(names)), "field_name must be unique per field"
 
     def test_every_field_has_required_keys(self, sample_pdf_path):
         fields = parse_pdf(sample_pdf_path)
@@ -203,7 +208,7 @@ class TestUploadHook:
         doc_id = created_pdf_doc
         row = mongo_db.field_schemas.find_one({"document_id": doc_id})
         assert row is not None, "field_schemas row should exist after upload"
-        assert row["field_count"] == 182, row["field_count"]
+        assert row["field_count"] == 179, row["field_count"]
         assert row["source"] == "acroform"
 
 
@@ -216,12 +221,12 @@ class TestSchemaEndpoint:
         assert r.status_code == 200, f"{r.status_code} {r.text[:300]}"
         body = r.json()
         assert body["document_id"] == doc_id
-        assert body["field_count"] == 182
+        assert body["field_count"] == 179
         assert body["source"] == "acroform"
         assert body["parser_version"] == "1.0"
         assert "extracted_at" in body
         assert isinstance(body["fields"], list)
-        assert len(body["fields"]) == 182
+        assert len(body["fields"]) == 179
         needed = {"field_name", "field_type", "page", "position",
                   "options", "required", "value", "source"}
         for f in body["fields"]:
@@ -252,7 +257,7 @@ class TestSchemaEndpoint:
                          headers=auth_headers, timeout=30)
         assert r.status_code == 200, r.text[:300]
         body = r.json()
-        assert body["field_count"] == 182, body["field_count"]
+        assert body["field_count"] == 179, body["field_count"]
         assert body["source"] == "acroform"
 
 

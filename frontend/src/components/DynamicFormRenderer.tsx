@@ -166,6 +166,19 @@ export default function DynamicFormRenderer({
         throw new Error(`Schema fetch failed: ${res.status}`);
       }
       const body: SchemaEnvelope = await res.json();
+      // Defensive: collapse any duplicate field entries by field_name. An
+      // AcroForm radio group shares one field_name across its option widgets
+      // (Yes/No), so an older cached schema may list the same field twice.
+      // They are the SAME logical field bound to one value — keep the first
+      // so we don't render the question twice or collide on React keys.
+      if (Array.isArray(body.fields)) {
+        const seen = new Set<string>();
+        body.fields = body.fields.filter((f) => {
+          if (seen.has(f.field_name)) return false;
+          seen.add(f.field_name);
+          return true;
+        });
+      }
       setEnvelope(body);
       // Seed initial values from schema.value where present so previously
       // populated defaults (e.g. checkboxes preset in the PDF) appear.
@@ -605,7 +618,7 @@ export default function DynamicFormRenderer({
     );
   };
 
-  const renderField = (f: SchemaField) => {
+  const renderField = (f: SchemaField, idx: number) => {
     let node: React.ReactNode = null;
     switch (f.field_type) {
       case "text":
@@ -630,7 +643,7 @@ export default function DynamicFormRenderer({
       default:
         return null;
     }
-    return <View key={f.field_name}>{node}</View>;
+    return <View key={`${f.field_name}-${idx}`}>{node}</View>;
   };
 
   // -------- Render ---------------------------------------------------------

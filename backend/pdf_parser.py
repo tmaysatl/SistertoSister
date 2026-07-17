@@ -95,7 +95,16 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
     text heuristic.
     """
     p = str(pdf_path)
-    out: List[Dict[str, Any]] = []
+    # Fields are keyed by their fully-qualified name. An AcroForm radio group
+    # exposes one *widget* per option (e.g. a Yes widget and a No widget) but
+    # all widgets share a single field_name — they are the SAME logical field
+    # and bind to one form value. Multi-page or repeated-appearance fields do
+    # the same. We therefore group widgets by name and emit ONE row per field,
+    # instead of one row per widget (which previously produced duplicate
+    # entries — a Yes/No radio showed up twice, with empty options, colliding
+    # on a single value and triggering duplicate-key warnings in the UI).
+    order: List[str] = []
+    by_name: Dict[str, Dict[str, Any]] = {}
     with pymupdf.open(p) as doc:
         for page_index in range(doc.page_count):
             page = doc[page_index]
@@ -110,16 +119,18 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
                 if not name:
                     continue
                 ftype = _widget_type(w)
-                options: List[str] = []
-                # Choice fields expose `choice_values` (list of strings or
-                # list of [export, display] pairs).
+                # Choice fields (combobox/listbox) expose selectable options
+                # via `choice_values` (list of strings, or [export, display]
+                # pairs). Radio/checkbox export states are opaque, so we leave
+                # their options empty and let the renderer supply labels.
+                w_options: List[str] = []
                 cvs = getattr(w, "choice_values", None)
                 if cvs:
                     for item in cvs:
                         if isinstance(item, (list, tuple)) and item:
-                            options.append(str(item[-1]))
+                            w_options.append(str(item[-1]))
                         else:
-                            options.append(str(item))
+                            w_options.append(str(item))
                 # Required flag: PDF spec, bit 2 of field_flags.
                 flags = int(getattr(w, "field_flags", 0) or 0)
                 required = bool(flags & 2)
@@ -129,17 +140,33 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
                         value = str(value)
                     except Exception:
                         value = None
-                out.append({
-                    "field_name": name,
-                    "field_type": ftype,
-                    "page": page_index + 1,
-                    "position": _rect_dict(w.rect),
-                    "options": options,
-                    "required": required,
-                    "value": value or None,
-                    "source": "acroform",
-                })
-    return out
+                # An unset radio/checkbox reports "Off" — treat as no value so
+                # that an "on" widget in the same group can win the merge.
+                norm_value = value if (value and value != "Off") else None
+
+                existing = by_name.get(name)
+                if existing is None:
+                    by_name[name] = {
+                        "field_name": name,
+                        "field_type": ftype,
+                        "page": page_index + 1,
+                        "position": _rect_dict(w.rect),
+                        "options": list(dict.fromkeys(w_options)),
+                        "required": required,
+                        "value": norm_value,
+                        "source": "acroform",
+                    }
+                    order.append(name)
+                else:
+                    # Merge this widget into the field we already recorded.
+                    for o in w_options:
+                        if o not in existing["options"]:
+                            existing["options"].append(o)
+                    if required:
+                        existing["required"] = True
+                    if existing["value"] is None and norm_value is not None:
+                        existing["value"] = norm_value
+    return [by_name[n] for n in order]
 
 
 # ---------------------------------------------------------------------------
