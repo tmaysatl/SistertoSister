@@ -811,3 +811,104 @@ agent_communication:
 
       test_result.md updated: Phase 2 frontend task marked working=true
       needs_retesting=false.
+
+  - task: "Passwords not working — Supabase project paused, fell back to Legacy default"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/context/AuthContext.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          USER BUG: "Passwords not working". RCA: Supabase host
+          wzshjedcbkygohcpytgf.supabase.co is DNS-unreachable
+          (free-tier project auto-paused). Frontend was defaulting to
+          Supabase mode → all logins failed.
+
+          FIX (main agent, verified this iteration):
+          /app/frontend/src/context/AuthContext.tsx
+            - useState<AuthMode>("legacy") initial default.
+            - Bootstrap useEffect forces effectiveMode="legacy" even when
+              AsyncStorage returns "supabase" (outage fallback).
+            - Supabase toggle pill still available on the login screen for
+              users who want to opt back in once the project is unpaused.
+
+          VERIFICATION (iteration 27):
+            Backend pytest (test_legacy_auth.py) — 4/4 PASS:
+              admin login 200 + role=admin, caregiver login 200 + role=caregiver,
+              wrong password 401 "Incorrect email or password", /auth/me 200.
+            Frontend Playwright (mobile viewport 390x844):
+              T1 fresh pill = "Auth: Legacy (MongoDB) · tap to switch" ✅
+              T2 admin@healthguard.com / Admin@123 → dashboard renders
+                 (AUDIT READINESS + Overview cards + tab bar) ✅
+              T3 Documents tab renders 51 items with eye/edit/user buttons ✅
+              T4 Wrong password → inline "Incorrect email or password" ✅
+              T5 Toggle → Supabase, attempt login →
+                 "Can't reach the server. Check your connection." shown,
+                 app does NOT crash, toggle still visible ✅
+              T6 Inject localStorage['authMode']='supabase' + reload →
+                 pill still on Legacy (outage fallback overrides
+                 persisted preference) ✅
+              T7 Logout via testID logout-button → back to login,
+                 pill on Legacy ✅
+
+          Screenshots: /tmp/it27_after_login.png, /tmp/it27_docs.png,
+          /tmp/it27_final.png. Backend junit:
+          /app/test_reports/pytest/iteration27_results.xml. Full report:
+          /app/test_reports/iteration_27.json.
+
+
+  - agent: "testing"
+    message: |
+      Iteration 27 — "Passwords not working" bug fix verification.
+      **BACKEND 4/4 PASS + FRONTEND 7/7 PASS.**
+
+      Context: Supabase free-tier project (wzshjedcbkygohcpytgf.supabase.co)
+      auto-paused → DNS unreachable from container. Frontend was
+      defaulting to Supabase mode → users couldn't log in. Main agent
+      flipped AuthContext.tsx default to 'legacy' and made the bootstrap
+      effect override any persisted 'supabase' AsyncStorage value.
+
+      Backend pytest (/app/backend/tests/test_legacy_auth.py):
+        • POST /api/auth/login admin/Admin@123 → 200, role=admin ✅
+        • POST /api/auth/login caregiver/Caregiver@123 → 200,
+          role=caregiver ✅
+        • POST /api/auth/login admin/wrongpass → 401
+          "Incorrect email or password" ✅
+        • GET /api/auth/me with bearer → 200, email echoes ✅
+      JUnit: /app/test_reports/pytest/iteration27_results.xml
+
+      Frontend Playwright (mobile 390x844,
+        https://audit-prep-hub.preview.emergentagent.com):
+        • Fresh localStorage → pill = "Auth: Legacy (MongoDB) · tap to
+          switch" (NOT Supabase) ✅
+        • admin@healthguard.com / Admin@123 → dashboard renders (AUDIT
+          READINESS + Overview cards + tab bar) ✅
+        • Documents tab loads 51 items with eye/edit/user buttons ✅
+        • Wrong password → inline "Incorrect email or password" ✅
+        • Toggle → Supabase, attempt login → helpful
+          "Can't reach the server. Check your connection." error, app
+          does NOT crash, toggle pill still visible ✅
+        • Toggle back → Legacy label restored, subsequent Admin@123
+          login succeeds ✅
+        • localStorage['authMode']='supabase' injection + reload →
+          pill stays on Legacy (outage fallback overrides persisted
+          preference) ✅
+        • Logout via testID="logout-button" → back on login screen,
+          pill still Legacy ✅
+
+      Zero backend/frontend issues to report. Bug fix is verified.
+      Marked frontend task "Passwords not working — Supabase project
+      paused, fell back to Legacy default" working=true,
+      needs_retesting=false in test_result.md.
+
+      Non-blocking notes for main agent (already known):
+        • Console still logs pre-existing "Encountered two children with
+          the same key" warnings on Documents list (unchanged from
+          iteration 24/26).
+        • Console shows a 500 during dashboard load
+          (/api/audit-readiness or similar) — pre-existing, unrelated
+          to auth fix.

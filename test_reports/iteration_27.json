@@ -1,0 +1,40 @@
+{
+  "summary": "'Passwords not working' bug fix VERIFIED end-to-end. Supabase project paused → DNS unreachable → main agent flipped AuthContext default to Legacy MongoDB mode. Backend pytest 4/4 PASS (admin+caregiver login 200, wrong-pw 401, /auth/me 200). Frontend Playwright 7/7 PASS: fresh pill=Legacy, admin@healthguard.com/Admin@123 lands on dashboard, Documents renders 51 items, wrong password shows inline 'Incorrect email or password', Supabase toggle still reachable & fails gracefully with 'Can't reach the server. Check your connection.' (no crash), localStorage authMode=supabase injection is overridden by outage fallback, logout returns to login with pill still on Legacy. No new issues introduced. Deprecated Expo packages: none detected. SafeAreaView issues: none.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_legacy_auth.py",
+    "/app/test_reports/pytest/iteration27_results.xml",
+    "/tmp/it27_after_login.png",
+    "/tmp/it27_docs.png",
+    "/tmp/it27_final.png"
+  ],
+  "action_items": [
+    "None for this bug — fix verified. Optional cleanup: DEAD BRANCH in AuthContext.tsx line 57-58 `storedMode === 'legacy' ? 'legacy' : 'legacy'` evaluates identically on both sides; could simplify to `const effectiveMode: AuthMode = 'legacy';` with the outage comment. Purely readability.",
+    "When Supabase project is unpaused, main agent should revert AuthContext.tsx default back to `SUPABASE_CONFIGURED ? 'supabase' : 'legacy'` and remove the forced-legacy override in the bootstrap effect.",
+    "Pre-existing non-blocker (unchanged from iteration 24/26): Documents list emits 'Encountered two children with the same key' warnings — fix key={`${opt}-${idx}`} inside f.options.map.",
+    "Pre-existing non-blocker: a 500 response is observed on dashboard load (audit-readiness aggregation) — not caused by this fix."
+  ],
+  "critical_code_review_comments": [
+    "AuthContext.tsx L57-58: `const effectiveMode: AuthMode = storedMode === 'legacy' ? 'legacy' : 'legacy'` — ternary is a no-op. Both branches return 'legacy'. Functionally correct (that's the intent during the outage), but the ternary reads like a bug. Recommend `const effectiveMode: AuthMode = 'legacy';` with a comment referencing the outage.",
+    "AuthContext.tsx L61: The follow-up `if (effectiveMode === 'supabase' && SUPABASE_CONFIGURED)` block is now unreachable given the forced-legacy assignment above. Safe to leave for the revert, but dead code today.",
+    "AuthContext.tsx L44 comment mentions 'Phase 6 -> Aug 2026' but the review request says 'current date 2026-08-03'; date is consistent, good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_legacy_auth.py (new)",
+    "/app/test_result.md (added frontend task + agent_communication testing entry)",
+    "/app/test_reports/iteration_27.json (this file)",
+    "/app/test_reports/pytest/iteration27_results.xml (junit)"
+  ],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "100% (7/7)"},
+  "seed_data_creation": "None. Used existing seeded users admin@healthguard.com and caregiver@healthguard.com.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Auth is currently pinned to Legacy MongoDB mode intentionally due to the Supabase outage. When the user resumes their Supabase project, main agent will revert AuthContext.tsx to auto-detect via SUPABASE_CONFIGURED and drop the forced-legacy override in the bootstrap effect. At that point re-run test_legacy_auth.py + a Supabase-mode Playwright login (admin@healthguard.com / AdminPassword123!).",
+  "rca_of_issue": "USER BUG: 'Passwords not working'. ROOT CAUSE: The Supabase project host wzshjedcbkygohcpytgf.supabase.co auto-paused after ~1 week of free-tier inactivity, so its DNS resolves nowhere from the container (curl exit 6). Because AuthContext previously initialised `mode` to `SUPABASE_CONFIGURED ? 'supabase' : 'legacy'` and SUPABASE_CONFIGURED is true (anon key + URL present in .env), the login screen defaulted to Supabase → `supabase.auth.signInWithPassword` threw 'Failed to fetch' / TypeError → user saw 'Passwords not working'. REPRODUCTION: (1) clear localStorage, (2) load app with EXPO_PUBLIC_SUPABASE_URL pointing at a paused project, (3) enter valid credentials → login fails. FIX APPLIED (main agent) & VERIFIED (this iteration): AuthContext.tsx now defaults to 'legacy' and the bootstrap useEffect ignores a persisted 'supabase' AsyncStorage value, so users are never trapped on the broken flow. The Supabase toggle pill on the login screen still lets users opt back in — attempted logins in Supabase mode surface a friendly 'Can't reach the server. Check your connection.' banner instead of crashing. MITIGATION for user: unpause the Supabase project in the Supabase dashboard, then tap the pill on the login screen to switch back to Supabase mode."
+}

@@ -36,15 +36,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // Default to Supabase if it's configured; otherwise legacy.
-  const [mode, setModeState] = useState<AuthMode>(SUPABASE_CONFIGURED ? "supabase" : "legacy");
+  // Phase 6 -> Aug 2026: the Supabase project auto-paused on the free tier,
+  // making Supabase Auth unreachable. Falling back to Legacy JWT as the
+  // default. Users can flip back to Supabase via the toggle pill on the
+  // login screen once the project is resumed. The dual-mode auth verifier
+  // on the backend still accepts either token type — nothing else changes.
+  const [mode, setModeState] = useState<AuthMode>("legacy");
 
   // Bootstrap: detect persisted mode + restore Supabase session OR legacy creds.
   useEffect(() => {
     (async () => {
       try {
         const storedMode = (await AsyncStorage.getItem(MODE_KEY)) as AuthMode | null;
-        const effectiveMode: AuthMode = storedMode ?? (SUPABASE_CONFIGURED ? "supabase" : "legacy");
+        // Force legacy as the effective mode until Supabase is verified
+        // reachable again (see comment above). We deliberately IGNORE a
+        // stored 'supabase' preference during this outage window — users
+        // who previously signed in via Supabase would otherwise be stuck
+        // on the login screen with an unreachable server. If they still
+        // want to try Supabase they can tap the toggle pill.
+        const effectiveMode: AuthMode =
+          storedMode === "legacy" ? "legacy" : "legacy";
         setModeState(effectiveMode);
 
         if (effectiveMode === "supabase" && SUPABASE_CONFIGURED) {
