@@ -48,14 +48,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     (async () => {
       try {
         const storedMode = (await AsyncStorage.getItem(MODE_KEY)) as AuthMode | null;
-        // Force legacy as the effective mode until Supabase is verified
-        // reachable again (see comment above). We deliberately IGNORE a
-        // stored 'supabase' preference during this outage window — users
-        // who previously signed in via Supabase would otherwise be stuck
-        // on the login screen with an unreachable server. If they still
-        // want to try Supabase they can tap the toggle pill.
-        const effectiveMode: AuthMode =
-          storedMode === "legacy" ? "legacy" : "legacy";
+        // Force legacy as the effective mode until the Supabase project is
+        // unpaused (see the header comment on the useState line). We
+        // deliberately IGNORE any previously stored preference during this
+        // outage window — users who previously signed in via Supabase would
+        // otherwise be stuck on the login screen with an unreachable server.
+        // TODO(post-outage): revert to `storedMode ?? (SUPABASE_CONFIGURED ? "supabase" : "legacy")`.
+        void storedMode; // kept for a future toggle re-read
+        const effectiveMode: AuthMode = "legacy";
         setModeState(effectiveMode);
 
         if (effectiveMode === "supabase" && SUPABASE_CONFIGURED) {
