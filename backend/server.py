@@ -1,8 +1,9 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request
 from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 import os
 import io
+import csv
 import re
 import asyncio
 import base64
@@ -26,9 +27,25 @@ from core.security import (
     get_current_user, require_admin, oauth2_scheme,
 )
 from core import supa_data
-from core.push import send_push, _push_client
+try:
+    from core.push import send_push, _push_client
+except Exception as e:  # pragma: no cover - defensive: push is best-effort,
+    # never let a broken/missing optional integration take the whole app down
+    # (this exact failure mode -- an unguarded import of a file that didn't
+    # exist -- previously crashed the entire backend at startup; see the
+    # matching guard around `routers.ms_graph` below).
+    logging.getLogger(__name__).warning(
+        "core.push unavailable (%s) -- push notifications disabled, rest of the app is unaffected", e,
+    )
+    send_push = None
+    _push_client = None
 from core.settings import EMERGENT_LLM_KEY
 from core.pdf_utils import _load_logo, _make_watermark, stamp_pdf
+from core.scheduling import (
+    start_scheduler as _start_expiration_scheduler,
+    stop_scheduler as _stop_expiration_scheduler,
+    run_expiration_reminder_sweep,
+)
 from pdf_parser import parse_pdf as _parse_pdf_fields
 
 
@@ -57,7 +74,20 @@ from models import (
     ChatMessageReq, now_iso,
 )
 from routers import shifts as shifts_router
-from routers import ms_graph as ms_graph_router
+try:
+    from routers import ms_graph as ms_graph_router
+except Exception as e:  # pragma: no cover - defensive: this file does not
+    # exist in this checkout at all (Microsoft Graph / SharePoint audit-binder
+    # auto-export -- MS_TENANT_ID etc. default to "", i.e. off-by-default even
+    # when present). Previously an unguarded `from routers import ms_graph`
+    # crashed the ENTIRE backend at import time, before it could serve a
+    # single request -- independent of Mongo/Supabase config. Guard it so a
+    # missing/broken optional integration never does that again.
+    logging.getLogger(__name__).warning(
+        "routers.ms_graph unavailable (%s) -- Microsoft Graph integration and the scheduled "
+        "audit-binder export are disabled, rest of the app is unaffected", e,
+    )
+    ms_graph_router = None
 from routers import supabase_router
 
 
@@ -119,8 +149,14 @@ async def me(current: UserPublic = Depends(get_current_user)):
 # ---------- USERS / CAREGIVERS ----------
 @api.get("/caregivers", response_model=List[UserPublic])
 async def list_caregivers(_: UserPublic = Depends(get_current_user)):
-    # Phase 4: source from Supabase Postgres profiles
-    rows = await supa_data.list_users_by_role("caregiver")
+    # Phase 4: source from Supabase Postgres profiles, with a Mongo fallback
+    # (same pattern as /stats) so a Postgres/Supabase outage doesn't also
+    # take down the caregiver list every admin screen depends on.
+    try:
+        rows = await supa_data.list_users_by_role("caregiver")
+    except Exception as e:
+        logger.warning("caregivers: Postgres list failed, falling back to Mongo: %s", e)
+        rows = await db.users.find({"role": "caregiver"}, {"_id": 0, "hashed_password": 0}).sort("name", 1).to_list(1000)
     return [UserPublic(**r) for r in rows]
 
 
@@ -136,8 +172,14 @@ async def create_client(req: ClientCreate, _: UserPublic = Depends(require_admin
 
 @api.get("/clients", response_model=List[Client])
 async def list_clients(_: UserPublic = Depends(get_current_user)):
-    # Phase 4: source from Supabase Postgres
-    rows = await supa_data.list_clients()
+    # Phase 4: source from Supabase Postgres, with a Mongo fallback (same
+    # pattern as /stats and /caregivers) so a Postgres/Supabase outage
+    # doesn't also take down the client list.
+    try:
+        rows = await supa_data.list_clients()
+    except Exception as e:
+        logger.warning("clients: Postgres list failed, falling back to Mongo: %s", e)
+        rows = await db.clients.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [Client(**r) for r in rows]
 
 
@@ -446,7 +488,13 @@ async def audit_binder(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+        # fname is fully static/ASCII today (no user-supplied text), but use
+        # the same Unicode-safe helper as the other PDF responses anyway --
+        # a prior bug (see _safe_disposition's docstring) crashed this exact
+        # header with a 500 whenever a title had a non-ASCII character, and
+        # this endpoint would silently become unsafe again the moment
+        # anyone adds a name/title into `fname`.
+        headers={"Content-Disposition": _safe_disposition(fname)},
     )
 
 
@@ -536,8 +584,10 @@ async def _build_audit_binder_bytes(client_id: Optional[str] = None,
             continue
         story.append(Paragraph(f"<font size=12><b>{label}</b> ({len(docs)})</font>", styles["Heading2"]))
         for d in docs:
-            attached = "Attached" if True else "—"  # placeholder
-            story.append(Paragraph(f"&nbsp;&nbsp;• {d['title']}", styles["Normal"]))
+            # NOTE: was a hardcoded "Attached" placeholder (`if True else`) --
+            # never actually reflected whether a file was attached.
+            attached = "Attached" if d.get("file_base64") else "Pending upload"
+            story.append(Paragraph(f"&nbsp;&nbsp;• {d['title']} — <i>{attached}</i>", styles["Normal"]))
         story.append(Spacer(1, 0.15 * inch))
     story.append(PageBreak())
 
@@ -608,6 +658,197 @@ async def _build_audit_binder_bytes(client_id: Optional[str] = None,
     return out.getvalue()
 
 
+# ---------- CSV AUDIT EXPORT ----------
+def _csv_response(filename: str, header: List[str], rows: List[List[Any]]) -> Response:
+    """Build a CSV Response. Includes a UTF-8 BOM so Excel (the realistic
+    destination for this) auto-detects the encoding instead of mangling
+    any non-ASCII name -- the exact class of bug _safe_disposition already
+    guards against for filenames, applied here to the file body too."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": _safe_disposition(filename)},
+    )
+
+
+@api.get("/reports/compliance-roster.csv")
+async def compliance_roster_csv(_: UserPublic = Depends(require_admin)):
+    """CSV export: one row per caregiver + one row per client, each with a
+    compliance-status snapshot (onboarding, policy acknowledgments,
+    credential expiration, training completions, documents on file, last
+    recorded activity) -- the "who's not audit-ready right now" view a
+    surveyor visit or an internal check would need.
+
+    Reads MongoDB directly rather than through supa_data/Postgres: Mongo is
+    the authoritative store, and (found while building this) several of the
+    Postgres-only read paths this would otherwise depend on
+    (list_caregivers, list_clients, list_policy_acks) have no fallback if
+    Supabase is unreachable -- see the fixes applied alongside this export.
+    Bulk-fetches each collection once and aggregates in memory rather than
+    querying per-person, so this stays fast regardless of roster size.
+    """
+    now_dt = datetime.now(timezone.utc)
+    now_s = now_dt.isoformat()
+    cutoff_30 = (now_dt + timedelta(days=30)).isoformat()
+
+    caregivers = await db.users.find({"role": "caregiver"}, {"_id": 0, "hashed_password": 0}).to_list(5000)
+    clients = await db.clients.find({}, {"_id": 0}).to_list(5000)
+    total_policies = await db.documents.count_documents({"category": "policy"})
+    total_trainings = await db.training.count_documents({})
+
+    onboarding_by_cg: Dict[str, List[dict]] = {}
+    async for step in db.onboarding.find({}, {"_id": 0, "caregiver_id": 1, "completed": 1}):
+        onboarding_by_cg.setdefault(step.get("caregiver_id"), []).append(step)
+
+    acks_by_user: Dict[str, int] = {}
+    async for a in db.policy_acks.find({}, {"_id": 0, "user_id": 1}):
+        uid = a.get("user_id")
+        if uid:
+            acks_by_user[uid] = acks_by_user.get(uid, 0) + 1
+
+    creds_by_cg: Dict[str, Dict[str, int]] = {}
+    async for cred in db.documents.find(
+        {"category": "credential", "owner_id": {"$ne": None}, "expires_at": {"$ne": None}},
+        {"_id": 0, "owner_id": 1, "expires_at": 1},
+    ):
+        bucket = creds_by_cg.setdefault(cred["owner_id"], {"expired": 0, "expiring": 0})
+        exp = cred.get("expires_at") or ""
+        if exp < now_s:
+            bucket["expired"] += 1
+        elif exp <= cutoff_30:
+            bucket["expiring"] += 1
+
+    training_by_cg: Dict[str, int] = {}
+    async for t in db.training_completions.find({}, {"_id": 0, "caregiver_id": 1}):
+        cid = t.get("caregiver_id")
+        if cid:
+            training_by_cg[cid] = training_by_cg.get(cid, 0) + 1
+
+    docs_by_owner_total: Dict[str, int] = {}
+    docs_by_owner_cat: Dict[str, Dict[str, int]] = {}
+    async for d in db.documents.find(
+        {"is_template": False, "owner_id": {"$ne": None}}, {"_id": 0, "owner_id": 1, "category": 1},
+    ):
+        oid, cat = d["owner_id"], (d.get("category") or "")
+        docs_by_owner_total[oid] = docs_by_owner_total.get(oid, 0) + 1
+        bucket = docs_by_owner_cat.setdefault(oid, {})
+        bucket[cat] = bucket.get(cat, 0) + 1
+
+    # document_views also captures "signed"/"submitted" actions (not just
+    # reads), so this alone is a reasonable "last touched anything" signal.
+    last_activity: Dict[str, str] = {}
+    async for v in db.document_views.find({}, {"_id": 0, "viewer_id": 1, "viewed_at": 1}).sort("viewed_at", 1):
+        vid = v.get("viewer_id")
+        if vid:
+            last_activity[vid] = v.get("viewed_at") or last_activity.get(vid, "")
+
+    client_onboarding_total = await db.documents.count_documents(
+        {"category": "client_onboarding", "is_template": True}
+    )
+
+    rows: List[List[Any]] = []
+    for u in caregivers:
+        cg_id = u.get("id")
+        steps = onboarding_by_cg.get(cg_id, [])
+        creds = creds_by_cg.get(cg_id, {"expired": 0, "expiring": 0})
+        rows.append([
+            "Caregiver", u.get("name") or "", u.get("email") or "",
+            sum(1 for s in steps if s.get("completed")), len(steps),
+            acks_by_user.get(cg_id, 0), total_policies,
+            creds["expired"], creds["expiring"],
+            training_by_cg.get(cg_id, 0), total_trainings,
+            docs_by_owner_total.get(cg_id, 0),
+            last_activity.get(cg_id, ""),
+        ])
+    for c in clients:
+        cl_id = c.get("id")
+        onboarding_done = docs_by_owner_cat.get(cl_id, {}).get("client_onboarding", 0)
+        rows.append([
+            "Client", c.get("name") or "", "",
+            onboarding_done, client_onboarding_total,
+            "", "",
+            "", "",
+            "", "",
+            docs_by_owner_total.get(cl_id, 0),
+            last_activity.get(cl_id, ""),
+        ])
+
+    header = [
+        "Type", "Name", "Email",
+        "Onboarding Done", "Onboarding Total",
+        "Policies Acknowledged", "Policies Total",
+        "Credentials Expired", "Credentials Expiring (30d)",
+        "Trainings Completed", "Trainings Total",
+        "Documents On File",
+        "Last Activity (UTC)",
+    ]
+    fname = f"SisterToSister_ComplianceRoster_{now_dt.strftime('%Y%m%d')}.csv"
+    return _csv_response(fname, header, rows)
+
+
+@api.get("/reports/audit-log.csv")
+async def audit_log_csv(
+    days: int = Query(365, ge=1, le=3650),
+    person_id: Optional[str] = None,
+    _: UserPublic = Depends(require_admin),
+):
+    """CSV export of the raw audit trail: one row per logged document
+    view/sign/submit event in the window, newest first -- "prove exactly
+    what happened and when" to complement the roster's "are we compliant
+    right now" summary above. `days` bounds the window (default 1 year);
+    optional `person_id` scopes to one caregiver/client/admin's activity.
+
+    Where a row corresponds to a locked e-signature submission (see
+    locked_pdf.py / create_document_submission), the submitter's IP and
+    the signed PDF's SHA-256 are included -- matched by (document, actor,
+    exact timestamp), which is reliable for anything submitted through
+    today's code (view + submission rows are written from the same
+    timestamp variable) but won't backfill for older data that never
+    captured this.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    q: Dict[str, Any] = {"viewed_at": {"$gte": since}}
+    if person_id:
+        q["viewer_id"] = person_id
+    views = await db.document_views.find(q, {"_id": 0}).sort("viewed_at", -1).to_list(20000)
+
+    doc_ids = list({v.get("document_id") for v in views if v.get("document_id")})
+    titles: Dict[str, str] = {}
+    if doc_ids:
+        async for d in db.documents.find({"id": {"$in": doc_ids}}, {"_id": 0, "id": 1, "title": 1}):
+            titles[d["id"]] = d.get("title") or ""
+
+    sub_q: Dict[str, Any] = {"submitted_at": {"$gte": since}}
+    if person_id:
+        sub_q["submitted_by"] = person_id
+    subs = await db.submissions.find(sub_q, {"_id": 0}).to_list(20000)
+    sub_by_key = {
+        (s.get("document_id"), s.get("submitted_by"), s.get("submitted_at")): s for s in subs
+    }
+
+    rows: List[List[Any]] = []
+    for v in views:
+        key = (v.get("document_id"), v.get("viewer_id"), v.get("viewed_at"))
+        sub = sub_by_key.get(key, {})
+        rows.append([
+            v.get("viewed_at") or "",
+            v.get("viewer_name") or "",
+            v.get("action") or "viewed",
+            titles.get(v.get("document_id"), v.get("document_id") or ""),
+            sub.get("submitter_ip") or "",
+            sub.get("pdf_sha256") or "",
+        ])
+
+    header = ["Timestamp (UTC)", "Actor", "Action", "Document", "IP Address", "PDF SHA-256"]
+    fname = f"SisterToSister_AuditLog_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return _csv_response(fname, header, rows)
+
+
 # ---------- DOCUMENTS ----------
 async def _extract_and_store_schema(doc_id: str, file_base64: str,
                                     mime_type: Optional[str]) -> int:
@@ -658,6 +899,16 @@ async def _extract_and_store_schema(doc_id: str, file_base64: str,
     except Exception as e:
         logger.warning("field-schema: mongo upsert failed for %s: %s", doc_id, e)
     return len(fields)
+
+
+async def _get_cached_fields(document_id: str) -> List[dict]:
+    """Read the cached pdf_parser field list for `document_id` (same data
+    the /schema endpoint serves), without re-parsing the PDF. Used by
+    create_document_submission to know each submitted field's real type
+    (checkbox/radio/text/...) when filling+locking a signed PDF. Returns
+    [] if no schema was ever extracted for this document."""
+    row = await db.field_schemas.find_one({"document_id": document_id}, {"_id": 0})
+    return (row or {}).get("fields") or []
 
 
 @api.post("/documents", response_model=Document)
@@ -761,43 +1012,153 @@ class DynamicSubmissionCreate(BaseModel):
 async def create_document_submission(
     document_id: str,
     payload: DynamicSubmissionCreate,
+    request: Request,
     current: UserPublic = Depends(get_current_user),
 ):
-    """Persist a filled-form submission for `document_id`.
+    """Persist a filled-form submission for `document_id`, AND (new) turn
+    it into a locked, hashed signed PDF wherever possible so the signer's
+    submission is a real, tamper-evident document -- not just a raw values
+    blob with nothing to show for it.
 
     Stored in the `submissions` collection with shape:
         {
-          id, document_id, submitted_by, submitter_email,
+          id, document_id, submitted_by, submitter_email, submitter_ip,
           values, signature_b64, submitted_at,
+          pdf_source, pdf_sha256, locked, signed_document_id,   # new
         }
+    The last four are only present when PDF generation succeeded; the raw
+    `values`/`signature_b64` audit record is always saved regardless, so a
+    generation failure never loses the submission itself (same guarantee
+    the endpoint always had).
+
+    Three-tier PDF generation, cheapest/most-reliable first:
+      1. Curated schema (form_schemas.py) if this title has one -- same
+         renderer /documents/{id}/submit-form already uses.
+      2. Generic AcroForm fill -- fills the document's REAL fillable PDF
+         (the one forms.py generated) using the field list already cached
+         from /schema, covers every fillable document, not just the
+         curated 5.
+      3. Generic summary PDF -- last-resort "cover sheet" for a document
+         with no real fillable fields at all (e.g. a flat scanned upload).
+
     Returns the created submission id and a snapshot of `field_count`
-    (the number of populated fields, for the client's confirmation UI).
+    (the number of populated fields, for the client's confirmation UI),
+    plus `signed_document_id`/`locked` so a caller can offer to show the
+    locked copy (today's UI already surfaces it via the normal document
+    list + viewer once created -- no other endpoint needed).
     """
     doc = await db.documents.find_one({"id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    ts = now_iso()
+    sub_id = str(uuid.uuid4())
+    title = doc.get("title", "")
+    values = payload.values or {}
+    client_ip = request.client.host if request and request.client else None
+
     sub = {
-        "id": str(uuid.uuid4()),
+        "id": sub_id,
         "document_id": document_id,
-        "document_title": doc.get("title"),
+        "document_title": title,
         "submitted_by": current.id,
         "submitter_email": current.email,
         "submitter_role": current.role,
-        "values": payload.values or {},
+        "values": values,
         "signature_b64": payload.signature_b64,
-        "submitted_at": now_iso(),
+        "submitted_at": ts,
+        "submitter_ip": client_ip,
     }
+
+    pdf_bytes: Optional[bytes] = None
+    pdf_source: Optional[str] = None
+    try:
+        if _has_schema(title):
+            pdf_bytes = _render_filled(title, values, payload.signature_b64, current.name)
+            pdf_source = "curated-schema"
+        else:
+            cached_fields = await _get_cached_fields(document_id)
+            is_pdf = (doc.get("mime_type") or "").lower() == "application/pdf"
+            if doc.get("file_base64") and is_pdf:
+                filled = _fill_acroform_pdf(base64.b64decode(doc["file_base64"]), values, cached_fields)
+                if filled is not None:
+                    pdf_bytes = filled
+                    pdf_source = "acroform-fill"
+            if pdf_bytes is None and cached_fields:
+                # No real fillable fields to fill (no file, not a PDF, or
+                # nothing acroform-sourced in the cached schema -- e.g. a
+                # flat/scanned upload with only text-heuristic matches).
+                # Still produce SOMETHING signable rather than nothing.
+                pdf_bytes = _render_generic_submission_pdf(
+                    title, cached_fields, values, payload.signature_b64, current.name,
+                )
+                pdf_source = "generic-summary"
+    except Exception as e:
+        logger.warning("submissions: pdf generation failed for %s (%s): %s", document_id, title, e)
+        pdf_bytes = None
+        pdf_source = None
+
+    signed_document_id: Optional[str] = None
+    if pdf_bytes:
+        digest = _sha256_hex(pdf_bytes)
+        sub["pdf_source"] = pdf_source
+        sub["pdf_sha256"] = digest
+        sub["locked"] = True
+
+        signed = Document(
+            title=f"COMPLETED - {title} - {current.name}",
+            category=doc.get("category"),
+            owner_id=current.id,
+            owner_type="caregiver" if current.role == "caregiver" else "agency",
+            file_base64=base64.b64encode(pdf_bytes).decode("ascii"),
+            mime_type="application/pdf",
+            notes=f"Signed & locked submission by {current.name} on {ts} — SHA-256 {digest[:16]}…",
+            uploaded_by=current.id,
+            seq=doc.get("seq"),
+            is_template=False,
+            locked=True,
+            pdf_sha256=digest,
+        )
+        await db.documents.insert_one(signed.dict())
+        signed_document_id = signed.id
+        sub["signed_document_id"] = signed_document_id
+
+        # Slice C dual-write, same pattern as sign_document()/submit_doc_form().
+        signed_dict = signed.dict()
+        signed_dict["signed_at"] = ts
+        signed_dict["signed_by"] = current.id
+        signed_dict["form_data"] = values
+        if payload.signature_b64:
+            signed_dict["signature_image"] = True  # presence flag only -- see supa_data.upsert_document
+        if signed.file_base64:
+            path = supa_data.upload_document_blob_sync(signed.id, signed.file_base64, "application/pdf")
+            signed_dict["storage_path"] = path
+        try:
+            await supa_data.upsert_document(signed_dict)
+        except Exception as e:
+            logger.warning("submissions: postgres mirror failed for %s: %s", signed.id, e)
+
+        await db.document_views.insert_one({
+            "id": str(uuid.uuid4()),
+            "document_id": document_id,
+            "viewer_id": current.id,
+            "viewer_name": current.name,
+            "action": "submitted",
+            "viewed_at": ts,
+        })
+
     await db.submissions.insert_one(sub)
     populated = sum(
-        1 for v in (payload.values or {}).values()
+        1 for v in values.values()
         if v not in (None, "", [], {}, False)
     )
     return {
-        "id": sub["id"],
+        "id": sub_id,
         "document_id": document_id,
-        "submitted_at": sub["submitted_at"],
+        "submitted_at": ts,
         "field_count": populated,
+        "signed_document_id": signed_document_id,
+        "locked": bool(pdf_bytes),
     }
 
 
@@ -998,9 +1359,17 @@ async def sign_document(
             page.merge_page(overlay)
         writer.add_page(page)
 
+    # Lock: the signature is now baked into the last page's content stream
+    # (merge_page above) -- strip any pre-existing form interactivity so
+    # the signed copy can't be re-edited. A no-op for the common case
+    # (signing a read-only policy/notice PDF with no form fields).
+    _strip_form_interactivity(writer)
+
     out = io.BytesIO()
     writer.write(out)
-    new_b64 = base64.b64encode(out.getvalue()).decode()
+    signed_bytes = out.getvalue()
+    new_b64 = base64.b64encode(signed_bytes).decode()
+    digest = _sha256_hex(signed_bytes)
 
     signed = Document(
         title=f"{d['title']} (signed by {current.name})",
@@ -1009,14 +1378,19 @@ async def sign_document(
         owner_type="caregiver" if current.role == "caregiver" else "agency",
         file_base64=new_b64,
         mime_type="application/pdf",
-        notes=f"Signed by {current.name} on {ts}",
+        notes=f"Signed by {current.name} on {ts} — SHA-256 {digest[:16]}…",
         uploaded_by=current.id,
         seq=d.get("seq"),
         is_template=False,
+        locked=True,
+        pdf_sha256=digest,
     )
     await db.documents.insert_one(signed.dict())
     # Slice C: dual-write the signed PDF
     signed_dict = signed.dict()
+    signed_dict["signed_at"] = ts
+    signed_dict["signed_by"] = current.id
+    signed_dict["signature_image"] = True
     if signed.file_base64:
         path = supa_data.upload_document_blob_sync(
             signed.id, signed.file_base64, signed.mime_type or "application/pdf"
@@ -1092,8 +1466,18 @@ POLICY_TEMPLATES = [
 ]
 
 
-from forms import all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS, build_policy_pdf, POLICY_BODIES
+from forms import (
+    all_fillable_pdfs, CLIENT_BUILDERS, CAREGIVER_BUILDERS,
+    build_policy_pdf, POLICY_BODIES,
+    build_client_onboarding_pdf, CLIENT_ONBOARDING_BODIES,
+)
 from form_schemas import SCHEMAS as _FORM_SCHEMAS, has_schema as _has_schema, get_schema as _get_schema, render_filled_pdf as _render_filled
+from locked_pdf import (
+    sha256_hex as _sha256_hex,
+    fill_acroform_pdf as _fill_acroform_pdf,
+    render_generic_submission_pdf as _render_generic_submission_pdf,
+    strip_form_interactivity as _strip_form_interactivity,
+)
 
 
 @api.get("/documents/{doc_id}/form-schema")
@@ -1125,6 +1509,8 @@ async def submit_doc_form(doc_id: str, req: SubmitFormReq,
         raise HTTPException(400, "This document has no fillable schema")
 
     pdf_bytes = _render_filled(title, req.values, req.signature_b64, current.name)
+    digest = _sha256_hex(pdf_bytes)
+    ts = now_iso()
     new_doc = {
         "id": str(uuid.uuid4()),
         "title": f"COMPLETED - {title} - {current.name}",
@@ -1136,20 +1522,34 @@ async def submit_doc_form(doc_id: str, req: SubmitFormReq,
         "file_base64": base64.b64encode(pdf_bytes).decode("ascii"),
         "mime_type": "application/pdf",
         "uploaded_by": current.id,
-        "uploaded_at": now_iso(),
+        "uploaded_at": ts,
         "is_template": False,
-        "notes": f"Filled from template: {title}",
-        "form_values": req.values,
+        "notes": f"Filled from template: {title} — SHA-256 {digest[:16]}…",
+        # NOTE: was "form_values" -- renamed to match supa_data.upsert_document's
+        # meta allowlist ("form_data"), which the old key silently missed
+        # (the Postgres mirror kept dropping the submitted values).
+        "form_data": req.values,
+        "locked": True,
+        "pdf_sha256": digest,
     }
     await db.documents.insert_one(new_doc)
     # Slice C: dual-write filled-form document
+    pg_doc = dict(new_doc)
+    pg_doc["signed_at"] = ts
+    pg_doc["signed_by"] = current.id
+    if req.signature_b64:
+        pg_doc["signature_image"] = True
     if new_doc.get("file_base64"):
         path = supa_data.upload_document_blob_sync(
             new_doc["id"], new_doc["file_base64"], "application/pdf"
         )
         new_doc["storage_path"] = path
-    await supa_data.upsert_document(new_doc)
-    return {"id": new_doc["id"], "title": new_doc["title"]}
+        pg_doc["storage_path"] = path
+    try:
+        await supa_data.upsert_document(pg_doc)
+    except Exception as e:
+        logger.warning("submit-form: postgres mirror failed for %s: %s", new_doc["id"], e)
+    return {"id": new_doc["id"], "title": new_doc["title"], "locked": True, "pdf_sha256": digest}
 
 
 @api.post("/documents/rebuild-fillable")
@@ -1165,10 +1565,16 @@ async def rebuild_fillable(current: UserPublic = Depends(require_admin)):
     # 1) For each generated PDF: find template by category+title, set file_base64
     for category, title, pdf_bytes, seq in all_fillable_pdfs():
         b64 = _b64.b64encode(pdf_bytes).decode("ascii")
+        # Phase 4 Slice C mirror: upload to Supabase Storage + Postgres too
+        # (same dual-write pattern as create_document()), so these fillable
+        # forms are also visible to Postgres-sourced counts/signed-URL reads.
         existing = await db.documents.find_one(
             {"category": category, "title": title, "is_template": True}
         )
         if existing:
+            storage_path = supa_data.upload_document_blob_sync(
+                existing["id"], b64, "application/pdf"
+            )
             await db.documents.update_one(
                 {"id": existing["id"]},
                 {"$set": {
@@ -1176,8 +1582,11 @@ async def rebuild_fillable(current: UserPublic = Depends(require_admin)):
                     "mime_type": "application/pdf",
                     "uploaded_at": now_iso(),
                     "seq": seq,
+                    "storage_path": storage_path,
                 }},
             )
+            pg_doc = {**existing, "file_base64": b64, "mime_type": "application/pdf",
+                      "seq": seq, "storage_path": storage_path}
         else:
             doc = Document(
                 title=title, category=category,  # type: ignore
@@ -1186,7 +1595,15 @@ async def rebuild_fillable(current: UserPublic = Depends(require_admin)):
                 seq=seq, is_template=True,
                 notes="Fillable form \u2014 open and complete in any PDF viewer.",
             )
+            storage_path = supa_data.upload_document_blob_sync(doc.id, b64, "application/pdf")
+            doc.storage_path = storage_path
             await db.documents.insert_one(doc.dict())
+            pg_doc = doc.dict()
+        if storage_path:
+            try:
+                await supa_data.upsert_document(pg_doc)
+            except Exception as e:
+                logger.warning("rebuild-fillable: postgres mirror failed for %s: %s", title, e)
         updated += 1
 
     # 2) Dedupe: keep only template rows whose titles match the canonical lists
@@ -1225,9 +1642,16 @@ async def list_acknowledgments(
 ):
     """List policy acknowledgments. Caregivers see only their own.
     Admins can pass `user_id` to view a specific caregiver's acks."""
-    # Slice H: read from Postgres
+    # Slice H: read from Postgres, with a Mongo fallback (same pattern as
+    # /stats/caregivers/clients) so a Postgres/Supabase outage doesn't also
+    # hide who has and hasn't acknowledged policies.
     target = current.id if current.role == "caregiver" else user_id
-    return await supa_data.list_policy_acks(user_id=target)
+    try:
+        return await supa_data.list_policy_acks(user_id=target)
+    except Exception as e:
+        logger.warning("policy-acks: Postgres list failed, falling back to Mongo: %s", e)
+        q = {"user_id": target} if target else {}
+        return await db.policy_acks.find(q, {"_id": 0}).sort("acknowledged_at", -1).to_list(2000)
 
 
 @api.post("/policies/acknowledge")
@@ -1290,11 +1714,69 @@ async def seed_templates(current: UserPublic = Depends(require_admin)):
                 "is_template": True,
                 "$or": [{"file_base64": None}, {"file_base64": ""}],
             })
+        def _seed_generator(raw_title: str):
+            """Return (pdf_builder_fn, notes, source_label) for auto-generated
+            seed content, or None if this (category, title) has no generator
+            -- those stay blank stubs requiring a manual admin upload, same
+            as always. Two generators exist today: the policy library
+            (forms.build_policy_pdf) and the 4 client-intake notices sourced
+            from the agency's handbook (forms.build_client_onboarding_pdf)."""
+            if category == "policy":
+                return (build_policy_pdf,
+                        "Auto-generated from agency policy library")
+            if category == "client_onboarding" and raw_title in CLIENT_ONBOARDING_BODIES:
+                return (build_client_onboarding_pdf,
+                        "Auto-generated from agency client intake packet")
+            return None
+
+        def _gen_seed_pdf_b64(raw_title: str) -> Optional[str]:
+            gen = _seed_generator(raw_title)
+            if not gen:
+                return None
+            builder_fn, _ = gen
+            try:
+                return base64.b64encode(builder_fn(raw_title)).decode()
+            except Exception as e:
+                logger.warning("seed: pdf build failed for %s/%s: %s", category, raw_title, e)
+                return None
+
         for i, t in enumerate(titles, start=1):
             title = f"{i:02d} - {t}"
             exists = await db.documents.find_one({"category": category, "title": title})
+            gen = _seed_generator(t)
+
+            if exists and gen and not exists.get("file_base64"):
+                # Row was seeded before a generator existed for it (or before
+                # this fix) and is stuck as an empty stub forever (the plain
+                # `if exists: continue` below would otherwise skip it on
+                # every future call). Backfill it in place. A row that
+                # already has a file -- including an admin's own custom
+                # upload -- is never touched.
+                _, notes = gen
+                file_b64 = _gen_seed_pdf_b64(t)
+                if file_b64:
+                    storage_path = supa_data.upload_document_blob_sync(
+                        exists["id"], file_b64, "application/pdf"
+                    )
+                    await db.documents.update_one(
+                        {"id": exists["id"]},
+                        {"$set": {
+                            "file_base64": file_b64,
+                            "mime_type": "application/pdf",
+                            "notes": notes,
+                            "storage_path": storage_path,
+                        }},
+                    )
+                    if storage_path:
+                        pg_doc = {**exists, "file_base64": file_b64,
+                                  "mime_type": "application/pdf", "storage_path": storage_path}
+                        await supa_data.upsert_document(pg_doc)
+                    created += 1
+                continue
+
             if exists:
                 continue
+
             doc = Document(
                 title=title,
                 category=category,  # type: ignore
@@ -1304,7 +1786,34 @@ async def seed_templates(current: UserPublic = Depends(require_admin)):
                 seq=i,
                 is_template=is_template,
             )
-            await db.documents.insert_one(doc.dict())
+            if gen:
+                # This title has a generator (policy library, or one of the
+                # 4 client-intake notices) -- never leave it as an empty
+                # stub with nothing to open.
+                _, notes = gen
+                doc.file_base64 = _gen_seed_pdf_b64(t)
+                if doc.file_base64:
+                    doc.mime_type = "application/pdf"
+                    doc.notes = notes
+
+                storage_path = None
+                if doc.file_base64:
+                    # Mirrors the dual-write pattern in create_document():
+                    # upload to Supabase Storage first, then persist the
+                    # returned storage_path on both Mongo and Postgres.
+                    storage_path = supa_data.upload_document_blob_sync(
+                        doc.id, doc.file_base64, doc.mime_type or "application/pdf"
+                    )
+                    doc.storage_path = storage_path
+
+                await db.documents.insert_one(doc.dict())
+
+                if doc.file_base64:
+                    d_for_pg = doc.dict()
+                    d_for_pg["storage_path"] = storage_path
+                    await supa_data.upsert_document(d_for_pg)
+            else:
+                await db.documents.insert_one(doc.dict())
             created += 1
 
     await seed("client_onboarding", CLIENT_ONBOARDING_TEMPLATES)
@@ -1331,6 +1840,17 @@ async def expiring_credentials(
         q["owner_id"] = current.id
     docs = await db.documents.find(q, {"_id": 0}).sort("expires_at", 1).to_list(200)
     return [Document(**d) for d in docs]
+
+
+@api.post("/admin/run-expiration-reminders")
+async def run_expiration_reminders_now(_: UserPublic = Depends(require_admin)):
+    """Manually trigger the expiration-reminder sweep (normally runs
+    automatically once a day -- see core/scheduling.py). Fully deduped
+    against a dedicated `expiration_reminders_sent` collection, so running
+    this can never double-send a reminder the daily job already covered --
+    safe to use for testing or to force an immediate check.
+    """
+    return await run_expiration_reminder_sweep()
 
 
 # ---------- ASSIGNMENTS ----------
@@ -1653,9 +2173,16 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
             overlay = PdfReader(io.BytesIO(buf.getvalue())).pages[0]
             page.merge_page(overlay)
         writer.add_page(page)
+
+    # Lock: signature is now baked into the last page's content stream --
+    # strip any pre-existing form interactivity (no-op if there was none).
+    _strip_form_interactivity(writer)
+
     out = io.BytesIO()
     writer.write(out)
-    new_b64 = base64.b64encode(out.getvalue()).decode()
+    signed_bytes = out.getvalue()
+    new_b64 = base64.b64encode(signed_bytes).decode()
+    digest = _sha256_hex(signed_bytes)
 
     signed_doc = Document(
         title=f"{d['title']} (signed by {pkt['recipient_name']})",
@@ -1664,10 +2191,12 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
         owner_type="agency",
         file_base64=new_b64,
         mime_type="application/pdf",
-        notes=f"Signed via packet link by {pkt['recipient_name']} on {ts}",
+        notes=f"Signed via packet link by {pkt['recipient_name']} on {ts} — SHA-256 {digest[:16]}…",
         uploaded_by="public-share",
         seq=d.get("seq"),
         is_template=False,
+        locked=True,
+        pdf_sha256=digest,
     )
     await db.documents.insert_one(signed_doc.dict())
     # Slice G: dual-write signed PDF to Postgres + Storage
@@ -1676,6 +2205,8 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
     signed_dict["owner_id"] = None
     # uploaded_by is "public-share" (non-UUID) so null it for the FK
     signed_dict["uploaded_by"] = None
+    signed_dict["signed_at"] = ts
+    signed_dict["signature_image"] = True
     storage_path = supa_data.upload_document_blob_sync(
         signed_doc.id, new_b64, "application/pdf"
     )
@@ -1700,10 +2231,39 @@ async def packet_sign(token_str: str, doc_id: str, payload: dict):
 
 
 # ---------- DASHBOARD STATS ----------
+async def _dashboard_counts_from_mongo() -> dict:
+    """Fallback for get_dashboard_counts() when Postgres/Supabase is
+    unreachable (e.g. free-tier auto-pause). Mongo is still the
+    authoritative store, so every count here has a live source -- this
+    keeps the compliance dashboard up instead of a hard 500."""
+    clients = await db.clients.count_documents({})
+    caregivers = await db.users.count_documents({"role": "caregiver"})
+    documents = await db.documents.count_documents({})
+    trainings = await db.training.count_documents({})
+    onboarding_total = await db.onboarding.count_documents({})
+    onboarding_done = await db.onboarding.count_documents({"completed": True})
+    training_completions = await db.training_completions.count_documents({})
+    return {
+        'clients': clients,
+        'caregivers': caregivers,
+        'documents': documents,
+        'trainings': trainings,
+        'onboarding_total': onboarding_total,
+        'onboarding_done': onboarding_done,
+        'training_completions': training_completions,
+    }
+
+
 @api.get("/stats")
 async def stats(current: UserPublic = Depends(get_current_user)):
-    # Phase 4: source from Supabase Postgres
-    counts = await supa_data.get_dashboard_counts()
+    # Phase 4: source from Supabase Postgres, with a Mongo fallback so a
+    # Postgres/Supabase outage (e.g. free-tier auto-pause) doesn't take the
+    # whole compliance dashboard down with an unhandled 500.
+    try:
+        counts = await supa_data.get_dashboard_counts()
+    except Exception as e:
+        logger.warning("stats: Postgres dashboard counts failed, falling back to Mongo: %s", e)
+        counts = await _dashboard_counts_from_mongo()
     # assignments still in Mongo for now (Phase 4b)
     total_assignments = await db.assignments.count_documents({})
 
@@ -1875,7 +2435,8 @@ app.include_router(api)
 
 # Mount modular routers under the same /api prefix
 app.include_router(shifts_router.router, prefix="/api")
-app.include_router(ms_graph_router.router, prefix="/api")
+if ms_graph_router is not None:
+    app.include_router(ms_graph_router.router, prefix="/api")
 app.include_router(supabase_router.router, prefix="/api")
 
 app.add_middleware(
@@ -1889,12 +2450,37 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _start_ms_scheduler():
-    ms_graph_router.start_scheduler()
+    if ms_graph_router is not None:
+        ms_graph_router.start_scheduler()
 
 
 @app.on_event("shutdown")
 async def _stop_ms_scheduler():
-    ms_graph_router.stop_scheduler()
+    if ms_graph_router is not None:
+        ms_graph_router.stop_scheduler()
+
+
+@app.on_event("shutdown")
+async def _close_push_client():
+    if _push_client is not None:
+        await _push_client.aclose()
+
+
+@app.on_event("startup")
+async def _start_expiration_reminder_scheduler():
+    try:
+        _start_expiration_scheduler()
+    except Exception as e:  # pragma: no cover - defensive: a scheduling bug
+        # (e.g. a bad timezone string) should never take the whole app down
+        logger.warning("expiration reminder scheduler failed to start: %s", e)
+
+
+@app.on_event("shutdown")
+async def _stop_expiration_reminder_scheduler():
+    try:
+        _stop_expiration_scheduler()
+    except Exception as e:
+        logger.warning("expiration reminder scheduler failed to stop cleanly: %s", e)
 
 
 @app.on_event("shutdown")

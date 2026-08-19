@@ -13,7 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core.db import db
-from core.push import send_push
+try:
+    from core.push import send_push
+except Exception as e:  # pragma: no cover - defensive, see server.py's matching guard
+    logging.getLogger(__name__).warning(
+        "core.push unavailable (%s) -- shift push notifications disabled, rest of the app is unaffected", e,
+    )
+    send_push = None
 from core.security import get_current_user, require_admin
 from core import supa_data
 from models import (
@@ -114,14 +120,39 @@ async def list_shifts(
     effective_cg = caregiver_id
     if current.role == 'caregiver':
         effective_cg = current.id
-    rows = await supa_data.list_shifts_filtered(
-        caregiver_id=effective_cg,
-        client_id=client_id,
-        start=start,
-        end=end,
-        one_off_only=True,
-    )
-    return [Shift(**r) for r in rows]
+    try:
+        rows = await supa_data.list_shifts_filtered(
+            caregiver_id=effective_cg,
+            client_id=client_id,
+            start=start,
+            end=end,
+            one_off_only=True,
+        )
+        return [Shift(**r) for r in rows]
+    except Exception as e:
+        # Postgres/Supabase outage (e.g. free-tier auto-pause) shouldn't 500
+        # the whole schedule view -- fall back to Mongo, the authoritative
+        # store. Same pattern as GET /stats, /caregivers, /clients,
+        # /policies/acknowledgments. Mongo docs are already written in the
+        # same shape Shift expects, so no column-mapping is needed here the
+        # way the Postgres query above needs.
+        logger.warning('list_shifts: Postgres read failed, falling back to Mongo: %s', e)
+        q: dict = {'kind': 'one_off'}
+        if effective_cg:
+            q['caregiver_id'] = effective_cg
+        if client_id:
+            q['client_id'] = client_id
+        if start or end:
+            date_q: dict = {}
+            if start:
+                date_q['$gte'] = start
+            if end:
+                date_q['$lte'] = end
+            q['date'] = date_q
+        docs = await db.shifts.find(q, {'_id': 0}).sort(
+            [('date', 1), ('start_time', 1)]
+        ).to_list(1000)
+        return [Shift(**d) for d in docs]
 
 
 @router.put('/shifts/{shift_id}', response_model=Shift)

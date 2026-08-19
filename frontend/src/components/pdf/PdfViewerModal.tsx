@@ -29,19 +29,36 @@ export function PdfViewerModal({
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [signing, setSigning] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const sigRef = useRef<SignatureViewRef>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  // Tracks the actual blob URL object so it can be revoked from the
+  // *current* value, not a stale closure (see the race-condition note
+  // below).
+  const blobUrlRef = useRef<string | null>(null);
 
   const canSign = !!(signPath || publicSignPath);
 
   useEffect(() => {
     if (!visible) {
-      setBlobUrl(null); setBase64(null); setSigning(false); return;
+      if (blobUrlRef.current) { URL.revokeObjectURL(blobUrlRef.current); blobUrlRef.current = null; }
+      setBlobUrl(null); setBase64(null); setSigning(false); setError(null);
+      return;
     }
+    // Guard against a race between requests: if the user opens Document A
+    // then quickly switches to Document B before A's fetch finishes, A's
+    // response could otherwise resolve *after* B's and overwrite the
+    // viewer with A's bytes while the header still shows B's title -- this
+    // was reported as "the pdf I supplied isn't the pdf being viewed."
+    // `cancelled` is flipped by this effect's own cleanup the instant
+    // `path`/`url`/`visible` changes again, so a stale response is
+    // detected and dropped instead of committed to state.
+    let cancelled = false;
     (async () => {
       setLoading(true);
+      setError(null);
       try {
         const target = url || `${API_BASE}${path}`;
         const headers: Record<string, string> = {};
@@ -50,32 +67,46 @@ export function PdfViewerModal({
           if (t) headers.Authorization = `Bearer ${t}`;
         }
         const res = await fetch(target, { headers });
+        if (cancelled) return;
         if (!res.ok) {
           // Surface a useful error instead of rendering an HTML error body
           // as if it were a PDF (that was the source of "wrong document"
           // bug reports — a 401/500 HTML response embedded in the iframe).
-          throw new Error(`Document fetch failed: ${res.status}`);
+          throw new Error(
+            res.status === 404
+              ? "This document doesn't have a file attached yet."
+              : `Document fetch failed (${res.status}). Please try again.`
+          );
         }
         const ct = res.headers.get("content-type") || "";
         if (!ct.includes("pdf") && !ct.includes("octet-stream")) {
           throw new Error(`Unexpected content-type: ${ct || "unknown"}`);
         }
         const blob = await res.blob();
+        if (cancelled) return;
         if (Platform.OS === "web") {
-          setBlobUrl(URL.createObjectURL(blob));
+          if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+          const next = URL.createObjectURL(blob);
+          blobUrlRef.current = next;
+          setBlobUrl(next);
         } else {
           const r = new FileReader();
           r.onloadend = () => {
+            if (cancelled) return;
             const s = (r.result as string) || "";
             setBase64(s.split(",")[1] || null);
           };
           r.readAsDataURL(blob);
         }
       } catch (e) {
+        if (cancelled) return;
         console.log("pdf modal load failed:", e);
-      } finally { setLoading(false); }
+        setError(e instanceof Error ? e.message : "Couldn't load this document.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
-    return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, path, url, refreshNonce]);
 
@@ -127,7 +158,19 @@ export function PdfViewerModal({
             {Platform.OS === "web" && blobUrl ? (
               <Pressable
                 testID="pdf-open-tab"
-                onPress={() => window.open(blobUrl, "_blank")}
+                onPress={() => {
+                  // In some embedded/preview contexts (e.g. an iframe
+                  // preview), a popup blocker can silently fail to open a
+                  // new tab -- and in a few browsers, a blocked
+                  // window.open() falls back to navigating the *current*
+                  // tab/frame away from the app instead, which looks like
+                  // "the app closed." Checking the return value lets us
+                  // warn instead of leaving that unexplained.
+                  const win = window.open(blobUrl, "_blank", "noopener,noreferrer");
+                  if (!win) {
+                    console.log("pdf-open-tab: window.open was blocked (popup blocker?)");
+                  }
+                }}
                 hitSlop={10}
                 style={styles.iconBtn}
               >
@@ -141,6 +184,21 @@ export function PdfViewerModal({
           <View style={styles.loadingOverlay}>
             <ActivityIndicator color={theme.colors.brandPrimary} />
             <Text style={styles.loadingText}>Loading document…</Text>
+          </View>
+        )}
+
+        {!loading && error && (
+          <View style={styles.errorState}>
+            <Ionicons name="alert-circle-outline" size={32} color={theme.colors.muted} />
+            <Text style={styles.errorText}>{error}</Text>
+            <Pressable
+              testID="pdf-retry"
+              onPress={() => setRefreshNonce((n) => n + 1)}
+              style={styles.retryBtn}
+            >
+              <Ionicons name="refresh" size={16} color="#fff" />
+              <Text style={styles.retryBtnText}>Try again</Text>
+            </Pressable>
           </View>
         )}
 
@@ -172,6 +230,21 @@ export function PdfViewerModal({
                   </body></html>`,
               }}
               style={{ flex: 1 }}
+              // A large/complex PDF rendered via an inline base64 data URI
+              // can crash WKWebView's own content (renderer) process on
+              // iOS -- previously unhandled, which is indistinguishable
+              // from the user's perspective from "the viewer just closed"
+              // or went blank with zero warning. Recover into the same
+              // error+retry UI the fetch-failure path below already uses
+              // instead of leaving a dead/blank view mounted.
+              onContentProcessDidTerminate={() => {
+                console.log("pdf webview content process terminated (iOS WKWebView crash)");
+                setError("The document viewer crashed while rendering this file. Tap Try again to reload it.");
+              }}
+              onError={(syntheticEvent: any) => {
+                console.log("pdf webview load error:", syntheticEvent?.nativeEvent);
+                setError("Couldn't render this document. Tap Try again to reload it.");
+              }}
             />
           )}
 
@@ -229,6 +302,14 @@ const styles = StyleSheet.create({
   title: { flex: 1, textAlign: "center", fontWeight: "700", fontSize: 14, color: theme.colors.onSurface, marginHorizontal: 8 },
   loadingOverlay: { position: "absolute", top: 70, left: 0, right: 0, alignItems: "center", gap: 6, padding: 12, zIndex: 5 },
   loadingText: { color: theme.colors.muted, fontSize: 12 },
+  errorState: {
+    position: "absolute", top: 70, left: 0, right: 0, bottom: 0, zIndex: 5,
+    alignItems: "center", justifyContent: "center", gap: 10, padding: 24,
+    backgroundColor: theme.colors.surface,
+  },
+  errorText: { color: theme.colors.muted, fontSize: 13, textAlign: "center" },
+  retryBtn: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10, backgroundColor: theme.colors.brandPrimary },
+  retryBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
   signOverlay: { position: "absolute", left: 0, right: 0, bottom: 0, top: 0, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end", padding: 12 },
   signCard: { backgroundColor: theme.colors.surface, borderRadius: 18, padding: 14, height: 380 },
   signTitle: { fontSize: 16, fontWeight: "700", color: theme.colors.onSurface },
