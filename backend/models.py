@@ -96,6 +96,13 @@ class Document(BaseModel):
     # Phase 4 Slice C: pointer to Supabase Storage object. Frontend uses this
     # as the canonical "file is viewable" flag (set after a successful upload).
     storage_path: Optional[str] = None
+    # Locked e-signature PDFs: set when this document is a generated,
+    # flattened signed record (form fields baked in + interactivity
+    # stripped -- see locked_pdf.py). pdf_sha256 is the integrity hash of
+    # file_base64 at the moment it was generated, for tamper detection.
+    # Both optional/None for every pre-existing document and upload.
+    locked: Optional[bool] = None
+    pdf_sha256: Optional[str] = None
 
 
 class DocumentCreate(BaseModel):

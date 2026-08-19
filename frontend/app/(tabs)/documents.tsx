@@ -203,6 +203,18 @@ export default function Documents() {
     setSeeding(true);
     try {
       await apiPost<{ created: number }>("/documents/seed-templates", {});
+      // Seeding alone leaves onboarding template rows with no file attached.
+      // rebuild-fillable generates the real fillable AcroForm PDF for every
+      // caregiver onboarding doc (and the 5 client onboarding docs that have
+      // a generator) and attaches it — without this, "fillable" documents
+      // never actually have a file to open.
+      try {
+        await apiPost<{ updated: number; deleted_duplicates: number }>(
+          "/documents/rebuild-fillable", {}
+        );
+      } catch (e) {
+        console.log("rebuild-fillable", e);
+      }
       await load();
     } catch (e) {
       console.log(e);

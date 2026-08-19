@@ -17,6 +17,8 @@ type Policy = {
   notes?: string;
   uploaded_at: string;
   seq?: number | null;
+  storage_path?: string | null;
+  file_base64?: string | null;
 };
 
 type Ack = {
@@ -108,6 +110,10 @@ export default function Policies() {
         {policies.map((p) => {
           const a = myAckFor(p.id);
           const acked = !!a;
+          // Same gate documents.tsx uses: only offer to open the viewer when
+          // a file actually exists, so a stub policy (no file attached)
+          // can't open a broken/blank PdfViewerModal.
+          const hasFile = !!(p.storage_path || p.file_base64);
           return (
             <Pressable
               key={p.id}
@@ -129,19 +135,28 @@ export default function Policies() {
                   <Text style={styles.cardSubOk}>
                     Acknowledged {new Date(a!.acknowledged_at).toLocaleString()}
                   </Text>
-                ) : (
+                ) : hasFile ? (
                   <Text style={styles.cardSub}>Tap Read to view, then check to acknowledge.</Text>
+                ) : (
+                  <Text style={styles.cardSub}>Not yet available — check back soon.</Text>
                 )}
               </View>
-              <Pressable
-                testID={`policy-read-${p.id}`}
-                onPress={(e) => { e.stopPropagation(); setViewing(p); }}
-                hitSlop={8}
-                style={styles.readBtn}
-              >
-                <Ionicons name="document-text-outline" size={16} color={theme.colors.brandPrimary} />
-                <Text style={styles.readBtnText}>Read</Text>
-              </Pressable>
+              {hasFile ? (
+                <Pressable
+                  testID={`policy-read-${p.id}`}
+                  onPress={(e) => { e.stopPropagation(); setViewing(p); }}
+                  hitSlop={8}
+                  style={styles.readBtn}
+                >
+                  <Ionicons name="document-text-outline" size={16} color={theme.colors.brandPrimary} />
+                  <Text style={styles.readBtnText}>Read</Text>
+                </Pressable>
+              ) : (
+                <View style={[styles.readBtn, styles.readBtnDisabled]}>
+                  <Ionicons name="time-outline" size={16} color={theme.colors.muted} />
+                  <Text style={styles.readBtnTextDisabled}>Pending</Text>
+                </View>
+              )}
             </Pressable>
           );
         })}
@@ -195,4 +210,6 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: theme.colors.brandPrimary,
   },
   readBtnText: { fontSize: 12, fontWeight: "700", color: theme.colors.brandPrimary },
+  readBtnDisabled: { backgroundColor: theme.colors.surfaceTertiary, borderColor: theme.colors.border },
+  readBtnTextDisabled: { fontSize: 12, fontWeight: "700", color: theme.colors.muted },
 });

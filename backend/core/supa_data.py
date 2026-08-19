@@ -383,6 +383,12 @@ async def upsert_document(d: dict) -> bool:
     meta = {k: d.get(k) for k in (
         "signature_image", "signed_at", "signed_by", "form_data",
         "public_url", "public_token", "watermark",
+        # Locked e-signature PDFs (see locked_pdf.py): pdf_sha256 is the
+        # integrity hash of file_base64; signature_image here is a bool
+        # flag ("a signature was captured"), not the raw image -- the
+        # actual pixels are already baked into the locked PDF itself, so
+        # we don't also duplicate them into Postgres jsonb.
+        "pdf_sha256", "locked",
     ) if d.get(k) is not None}
     async with pool.acquire() as conn:
         return await _safe(conn.execute(

@@ -72,6 +72,22 @@ def _widget_type(widget) -> str:
     return "text"
 
 
+_PDF_NAME_ESCAPE_RE = re.compile(r"#([0-9A-Fa-f]{2})")
+
+
+def _unescape_pdf_name(s: str) -> str:
+    """PDF name objects escape whitespace/delimiter bytes as #XX (hex) --
+    e.g. a "US citizen" radio export value is stored as "US#20citizen".
+    Decode those back to plain text for anything shown to a human or
+    round-tripped through the frontend (schema options, current value)."""
+    if not s or "#" not in s:
+        return s
+    try:
+        return _PDF_NAME_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), s)
+    except Exception:
+        return s
+
+
 def _rect_dict(rect) -> Dict[str, float]:
     try:
         return {
@@ -121,8 +137,9 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
                 ftype = _widget_type(w)
                 # Choice fields (combobox/listbox) expose selectable options
                 # via `choice_values` (list of strings, or [export, display]
-                # pairs). Radio/checkbox export states are opaque, so we leave
-                # their options empty and let the renderer supply labels.
+                # pairs). Checkbox export states are opaque (just one "on"
+                # state per field), so those stay empty and the renderer
+                # supplies a boolean toggle instead.
                 w_options: List[str] = []
                 cvs = getattr(w, "choice_values", None)
                 if cvs:
@@ -131,6 +148,24 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
                             w_options.append(str(item[-1]))
                         else:
                             w_options.append(str(item))
+                elif ftype == "radio":
+                    # A radio GROUP's real choices (e.g. "Checking"/"Savings",
+                    # a 1-4 rating scale) live in each widget's appearance
+                    # states, not choice_values (that's combobox/listbox
+                    # only). Deliberately scoped to "radio" and not
+                    # "checkbox" -- a plain on/off checkbox's single "Yes"
+                    # state would otherwise get reported as a 1-item options
+                    # list, which flips the frontend from a boolean toggle
+                    # to a 1-choice picker for every existing checkbox.
+                    try:
+                        states = w.button_states() or {}
+                        for s in states.get("normal", []):
+                            if s and s != "Off":
+                                s = _unescape_pdf_name(str(s))
+                                if s not in w_options:
+                                    w_options.append(s)
+                    except Exception as e:
+                        logger.warning("pdf_parser: button_states() failed for %s: %s", name, e)
                 # Required flag: PDF spec, bit 2 of field_flags.
                 flags = int(getattr(w, "field_flags", 0) or 0)
                 required = bool(flags & 2)
@@ -140,6 +175,8 @@ def extract_acroform_fields(pdf_path: str | Path) -> List[Dict[str, Any]]:
                         value = str(value)
                     except Exception:
                         value = None
+                elif isinstance(value, str) and ftype in ("radio", "checkbox"):
+                    value = _unescape_pdf_name(value)
                 # An unset radio/checkbox reports "Off" — treat as no value so
                 # that an "on" widget in the same group can win the merge.
                 norm_value = value if (value and value != "Off") else None
