@@ -454,7 +454,15 @@ def caregiver_03_w4() -> bytes:
         y -= 90
         y = _section(c, "Filing Status", y)
         _radio(c, "filing_status",
-               ["Single / MFS", "Married filing jointly", "Head of household"],
+               # NOTE: radio option strings become the widget's internal PDF
+               # export name -- reportlab does not escape "/" there, and a
+               # literal "/" (as "Single / MFS" had) produces a malformed
+               # name token that both pypdf and pymupdf fail to parse,
+               # silently dropping that one choice everywhere it's read
+               # (schema extraction, e-signature fill). Keep radio option
+               # strings free of "/" and other PDF delimiter characters
+               # ( ( ) < > [ ] { } % # ) for the same reason.
+               ["Single or MFS", "Married filing jointly", "Head of household"],
                0.6 * inch, y, dx=2.2 * inch)
         y -= 40
         y = _section(c, "Withholding Adjustments", y)
@@ -825,6 +833,18 @@ def all_fillable_pdfs() -> List[Tuple[str, str, bytes, int]]:
 # ============================================================
 # POLICY CONTENT PDFs (read-only body text per policy)
 # ============================================================
+#
+# NOTE (2026-08): keys below were realigned to match POLICY_TEMPLATES in
+# server.py exactly -- build_policy_pdf() looks up this dict by the literal
+# template title, so a mismatched key silently fell through to generic
+# filler text for 9 of the 10 policies. Content was sourced from the
+# agency's own PolicyHandbook_SistertoSisterPHCP.docx where a clear match
+# existed (Documentation Standards, Grievance Procedure, Caregiver Code of
+# Ethics, Medication Management, Incident & Accident Reporting); the
+# remaining topics keep the prior hand-written bullets, lightly adapted.
+# Anti-Discrimination & Harassment and Bloodborne Pathogens have no
+# agency-specific source text in the handbook -- flagged for the agency's
+# legal/clinical reviewer to confirm before relying on them for an audit.
 POLICY_BODIES: Dict[str, List[str]] = {
     "Code of Conduct": [
         "All Sister to Sister, PHCP team members are expected to act with "
@@ -836,7 +856,7 @@ POLICY_BODIES: Dict[str, List[str]] = {
         "Report any conflict of interest, ethical concern, or boundary issue "
         "to your supervisor in writing within 24 hours.",
     ],
-    "HIPAA Privacy & Security": [
+    "HIPAA Privacy Policy": [
         "Protected Health Information (PHI) includes anything that identifies "
         "a client \u2014 name, DOB, address, diagnoses, medications, photos.",
         "PHI must be accessed only as needed for assigned care duties. "
@@ -846,109 +866,337 @@ POLICY_BODIES: Dict[str, List[str]] = {
         "PHI on personal devices, social media, or unsecured cloud storage.",
         "Any suspected privacy breach must be reported to administration "
         "immediately so we can notify affected clients within legal timeframes.",
+        "Confidentiality obligations continue indefinitely after your "
+        "employment with the agency ends.",
         "HIPAA violations can result in immediate termination and personal "
         "civil/criminal liability.",
     ],
-    "Bloodborne Pathogen Exposure Control": [
-        "Treat all blood and body fluids as potentially infectious.",
-        "Use personal protective equipment (gloves, mask, gown, eye protection) "
+    # Template title covers both topics; merges the prior "Bloodborne Pathogen
+    # Exposure Control" and "Infection Control" bullet sets.
+    "Bloodborne Pathogens & Infection Control": [
+        "Treat all blood and body fluids as potentially infectious. Use "
+        "personal protective equipment (gloves, mask, gown, eye protection) "
         "for any task with potential exposure.",
         "Wash hands with soap and water for at least 20 seconds before and "
-        "after every client interaction.",
+        "after every client interaction \u2014 hand hygiene is the single most "
+        "effective infection-prevention measure.",
         "Clean and disinfect surfaces with EPA-approved disinfectant after any "
         "contact with blood or body fluids.",
-        "Report any needle stick, splash, or exposure within 1 hour. Post-exposure "
-        "prophylaxis is most effective when started promptly.",
-    ],
-    "Abuse, Neglect & Exploitation Reporting": [
-        "All staff are mandated reporters in our state. If you suspect a client "
-        "is being abused, neglected, or financially exploited \u2014 by anyone, "
-        "including a family member \u2014 you must report it.",
-        "Report immediately to your supervisor AND to the state Adult Protective "
-        "Services hotline. Reporting in good faith is legally protected.",
-        "Document objective observations only (what you saw or heard). "
-        "Do not record opinions or accusations in the chart.",
-        "Failure to report is itself a reportable offense.",
-    ],
-    "Infection Control": [
-        "Hand hygiene is the single most effective infection prevention measure.",
-        "Use the agency-approved cleaning protocol after every shift.",
+        "Report any needle stick, splash, or exposure within 1 hour. "
+        "Post-exposure follow-up is most effective when started promptly.",
         "Notify your supervisor before reporting to work if you have fever, "
         "cough, gastrointestinal symptoms, or open skin lesions.",
         "Annual flu vaccination is required. Other vaccines (TB, COVID) may be "
         "required based on the client's care plan.",
     ],
-    "Emergency Preparedness": [
-        "Familiarize yourself with each client's emergency plan on day one.",
-        "Know the location of fire extinguishers, exits, and emergency contact "
-        "list in every client's home.",
+    "Emergency Preparedness Plan": [
+        "Familiarize yourself with each client's emergency plan and Advance "
+        "Directive status on day one.",
+        "Know the location of fire extinguishers, exits, and the emergency "
+        "contact list in every client's home.",
         "For medical emergencies, call 911 first, then notify the office.",
-        "For weather emergencies, follow the agency's continuity-of-care plan.",
+        "For weather emergencies or other events that interrupt a scheduled "
+        "visit, follow the agency's continuity-of-care plan so the client is "
+        "never left without a coverage plan.",
+        "Report any emergency incident to the office as soon as it is safe to "
+        "do so, followed by written documentation per the Incident & Accident "
+        "Reporting policy.",
     ],
-    "Confidentiality": [
-        "Do not discuss any client outside the care team \u2014 not with friends, "
-        "family, coworkers off shift, or on social media.",
-        "Photographs of clients or their homes are not permitted without explicit "
-        "written authorization.",
-        "Confidentiality obligations continue indefinitely after your employment ends.",
+    # Sister to Sister is primarily a non-medical PCA/companion agency:
+    # caregivers remind, they do not administer, except where a licensed
+    # nurse is assigned under a physician's plan of care.
+    "Medication Management Policy": [
+        "Non-licensed caregivers (PCAs and companions) may only remind clients "
+        "about medications, meals, and hydration, as permitted by the client's "
+        "service plan and state guidelines \u2014 never administer, prepare, or "
+        "adjust a dose.",
+        "Never give a medication that is not the client's own, prescribed "
+        "medication, and never assist with an over-the-counter medication "
+        "unless it is listed on the client's service plan.",
+        "Where a licensed nurse (RN/LPN) is assigned to a case, medications "
+        "are administered only as ordered by the physician and documented on "
+        "the Medication Administration Record (MAR) for that shift.",
+        "Report any missed dose, refusal, adverse reaction, or medication "
+        "discrepancy to your supervisor immediately and document it "
+        "objectively in your shift notes.",
+        "Store and handle client medications exactly as directed by the "
+        "client, family, or care plan \u2014 caregivers do not reorganize or "
+        "relocate a client's medications.",
     ],
-    "Drug-Free Workplace": [
-        "Sister to Sister, PHCP maintains a drug- and alcohol-free workplace.",
-        "Caregivers may not consume alcohol or controlled substances within 8 hours "
-        "of any shift.",
-        "Pre-employment, random, post-incident, and reasonable-suspicion drug "
-        "screens may be performed at any time.",
-        "Prescription medications that may impair judgment must be disclosed to "
-        "the office prior to the start of a shift.",
+    "Incident & Accident Reporting": [
+        "Any fall, injury, medication error, property damage, or unusual "
+        "event involving a client or caregiver must be reported to the office "
+        "the same day, as soon as it is safe to do so.",
+        "Complete an Incident/Accident Report form for every reportable event "
+        "\u2014 document objective facts only (what you saw and heard, "
+        "time, and immediate actions taken), not opinions or assumptions.",
+        "For medical emergencies, call 911 first, then notify the office "
+        "immediately afterward.",
+        "Adverse events are reviewed by agency leadership as part of the "
+        "quality assurance program; you may be asked follow-up questions to "
+        "complete the record.",
+        "Failure to report a known incident is itself a policy violation.",
     ],
-    "Equal Employment Opportunity": [
-        "Sister to Sister, PHCP is an equal-opportunity employer.",
-        "We do not discriminate in hiring, training, promotion, or termination "
-        "based on race, color, religion, sex, sexual orientation, gender identity, "
-        "national origin, age, disability, veteran status, or any other protected "
-        "characteristic.",
-        "Concerns regarding discrimination or harassment should be reported to "
-        "the administrator promptly.",
+    # No agency-specific source text found in the handbook for this topic --
+    # standard EEO/anti-harassment language pending the agency's legal review.
+    "Anti-Discrimination & Harassment Policy": [
+        "Sister to Sister, PHCP is an equal-opportunity employer and does not "
+        "discriminate in hiring, training, assignment, promotion, or "
+        "termination based on race, color, religion, sex, sexual orientation, "
+        "gender identity, national origin, age, disability, veteran status, "
+        "or any other status protected by law.",
+        "Harassment of any kind \u2014 verbal, physical, or written, by a "
+        "coworker, supervisor, client, or client's family member \u2014 will "
+        "not be tolerated.",
+        "Concerns regarding discrimination or harassment should be reported "
+        "to the administrator promptly; reports are taken seriously and "
+        "investigated without retaliation against the person reporting.",
+        "This policy applies equally to how caregivers must treat clients, "
+        "coworkers, and the public while representing the agency.",
     ],
-    "Workplace Safety": [
-        "Use proper body mechanics for lifts and transfers. When in doubt, ask "
-        "for a second person.",
-        "Report any unsafe condition in a client's home (loose rugs, broken steps, "
-        "aggressive pets, unsafe weapons) to your supervisor immediately.",
-        "Workers compensation paperwork must be initiated within 24 hours of any "
-        "on-the-job injury.",
+    # Sourced from the handbook's Quality Improvement Program, section 5
+    # (Complaint and Resolution Process) -- agency-wide, not client-only.
+    "Grievance Procedure": [
+        "Grievances or complaints may be submitted by staff, clients, or "
+        "families by phone, email, or the online/in-app feedback form.",
+        "Submissions are acknowledged by the agency within 24 hours.",
+        "The Quality Assurance team investigates the complaint within five "
+        "business days of acknowledgment.",
+        "A resolution plan is developed and communicated back to the person "
+        "who raised the concern within 10 business days.",
+        "The agency follows up within 30 days to confirm the resolution was "
+        "effective and the concern did not recur.",
+        "Filing a grievance in good faith will never result in retaliation.",
+    ],
+    # Sourced from the handbook's "Policy and Procedure for Documenting
+    # Services Rendered" (Ga. Comp. R. & Regs. r. 111-8-65-.09).
+    "Documentation Standards": [
+        "Complete a Daily Service Record after every shift, including the "
+        "client's name, date, time in/out, tasks actually performed, your "
+        "printed name and signature, and any client-specific notes.",
+        "Document at the time of service or immediately after. A late entry "
+        "must be clearly labeled \u201cLate Entry\u201d with the date and time it "
+        "was actually recorded.",
+        "Record only what was actually performed, using objective language "
+        "(e.g., \u201cAssisted client with bathing and dressing,\u201d not "
+        "\u201cClient bathed\u201d unless directly witnessed) \u2014 never document "
+        "a task before it happens.",
+        "To correct an error: draw a single line through it, write the "
+        "correct information, then initial and date the correction. Never "
+        "erase, white-out, or obscure an original entry.",
+        "Documentation may be completed on approved paper forms or in the "
+        "agency's app/EHR system, and is reviewed by your supervisor at "
+        "least monthly for completeness and accuracy against the service plan.",
+        "Service records are retained for a minimum of three years after "
+        "service termination and must be available for inspection by the "
+        "Department of Community Health or other regulators.",
+    ],
+    # Built from repeated language across the agency's own job descriptions
+    # (Home Sitter/Companion and Personal Care Assistant roles) and client
+    # rights sections of the handbook.
+    "Caregiver Code of Ethics": [
+        "Provide care with patience, compassion, and respect, promoting each "
+        "client's dignity, independence, and emotional well-being.",
+        "Uphold client confidentiality and professionalism in accordance "
+        "with HIPAA and agency standards, on and off shift.",
+        "Deliver only the services authorized in the client's care/service "
+        "plan, and stay within your role's scope of practice.",
+        "Observe and promptly report any change in a client's condition, "
+        "safety, or environment to your supervisor.",
+        "Be reliable and punctual \u2014 clients depend on consistent, "
+        "trustworthy care; notify the office as early as possible if you "
+        "cannot make a scheduled shift.",
+        "Treat every client, family member, and coworker fairly and without "
+        "judgment, regardless of background, condition, or circumstances.",
     ],
 }
 
 
+def _build_notice_pdf(title: str, paragraphs: List[str], subtitle: str = "",
+                       footer_note: str = "") -> bytes:
+    """Build a read-only notice/policy PDF with branded chrome + body text.
+
+    Pages forward (new branded page, "(continued)" subtitle) instead of
+    silently truncating when content runs past one page -- real notices
+    like a HIPAA Notice of Privacy Practices routinely do. The previous
+    single-page version of this logic (used only by build_policy_pdf)
+    would silently drop any content past the first page; every policy body
+    happened to fit on one page so it never surfaced, but it was a latent
+    bug for exactly this kind of longer document.
+    """
+    from reportlab.lib.utils import simpleSplit
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    c.setTitle(title)
+    c.setAuthor("Sister to Sister, PHCP")
+    page = 1
+
+    def new_page(continued: bool = False) -> float:
+        c.setFillColor(colors.white)
+        c.rect(0, 0, letter[0], letter[1], stroke=0, fill=1)
+        page_subtitle = f"{subtitle} (continued)" if continued and subtitle else subtitle
+        y = _draw_chrome(c, title, page_subtitle)
+        c.setFillColor(colors.HexColor("#1d2421"))
+        c.setFont("Helvetica", 11)
+        return y
+
+    y = new_page()
+    for para in paragraphs:
+        wrapped = simpleSplit(para, "Helvetica", 11, letter[0] - 1.2 * inch)
+        for line in wrapped:
+            if y < 1.0 * inch:
+                _footer(c, page)
+                c.showPage()
+                page += 1
+                y = new_page(continued=True)
+            c.drawString(0.6 * inch, y, line)
+            y -= 16
+        y -= 10
+
+    c.setFillColor(TEXT_DIM)
+    c.setFont("Helvetica-Oblique", 8)
+    c.drawString(
+        0.6 * inch, 0.7 * inch,
+        footer_note or (
+            "Acknowledgment is recorded electronically in the "
+            "Sister to Sister, PHCP compliance app."
+        ),
+    )
+    _footer(c, page)
+    c.save()
+    return buf.getvalue()
+
+
 def build_policy_pdf(title: str) -> bytes:
-    """Build a one-page read-only policy PDF with branded chrome + body text."""
+    """Build a read-only policy PDF with branded chrome + body text."""
     # Strip "01 - " prefix when matching against POLICY_BODIES
     stripped = title.split(" - ", 1)[-1] if " - " in title else title
     paragraphs = POLICY_BODIES.get(stripped) or [
         "This policy is part of the Sister to Sister, PHCP compliance manual.",
         "Please contact administration for the full text of this policy.",
     ]
+    return _build_notice_pdf(stripped, paragraphs, "Read and acknowledge in the app.")
 
-    def build(c: canvas.Canvas):
-        from reportlab.lib.utils import simpleSplit
-        y = _draw_chrome(c, stripped, "Read and acknowledge in the app.")
-        c.setFillColor(colors.HexColor("#1d2421"))
-        c.setFont("Helvetica", 11)
-        for para in paragraphs:
-            wrapped = simpleSplit(para, "Helvetica", 11, letter[0] - 1.2 * inch)
-            for line in wrapped:
-                c.drawString(0.6 * inch, y, line)
-                y -= 16
-            y -= 10
-            if y < 1.2 * inch:
-                break
-        # Footer
-        c.setFillColor(TEXT_DIM)
-        c.setFont("Helvetica-Oblique", 8)
-        c.drawString(0.6 * inch, 0.7 * inch,
-                     "Acknowledgment is recorded electronically in the "
-                     "Sister to Sister, PHCP compliance app.")
-        _footer(c, 1)
 
-    return _wrap(build, stripped)
+# ============================================================
+# CLIENT INTAKE NOTICES (read-only body text per document)
+# ============================================================
+# Covers the 4 client_onboarding titles that are informational
+# notices/policies to review (and in some cases sign) rather than blank
+# forms to fill in -- Welcome Letter, Advanced Directives, the HIPAA
+# notice, and Client's Rights & Responsibilities. Content is condensed
+# from the agency's own PolicyHandbook_SistertoSisterPHCP.docx. The
+# Welcome Letter's bracketed per-client placeholders (client name, start
+# date) were intentionally dropped in favor of general phrasing, since
+# this generator produces one static PDF rather than a per-client mail
+# merge -- an admin can still personalize a copy by hand if desired.
+CLIENT_ONBOARDING_BODIES: Dict[str, List[str]] = {
+    "Welcome Letter": [
+        "Thank you for choosing Sister to Sister PHCP, LLC as your home "
+        "care provider — we look forward to supporting you and your family.",
+        "Every caregiver on our team is carefully screened, fully trained, "
+        "insured, and supervised, and is matched to your care needs and "
+        "personality to make visits comfortable and productive.",
+        "Your care plan is built together with you, and stays flexible as "
+        "your needs change over time.",
+        "Each visit is documented, and your caregiver completes a shift "
+        "report that can be shared with you electronically.",
+        "Your client intake packet includes: Advance Directive information, "
+        "the HIPAA Notice of Privacy Rights, your Client's Authorization "
+        "Form, the Provider Complaint/Grievance Process, Home Safety "
+        "Guidelines, a Disaster Planning/Emergency Plan, Third-Party Payer "
+        "Information, and your Client's Rights & Responsibilities — along "
+        "with an Auto Release and Authorization of Use of Personal Funds "
+        "where applicable.",
+        "To change or cancel a visit, call our main office at "
+        "678.373.8854 (Monday–Friday, 8:00 am–6:00 pm). Urgent matters "
+        "are handled 24 hours a day, 7 days a week through our messaging system.",
+        "Thank you again for placing your trust in our care team.",
+    ],
+    "Advanced Directives": [
+        "You have the right to make your own decisions about your medical "
+        "care, including the right to accept or refuse treatment and to "
+        "create an advance directive.",
+        "An advance directive may include a Living Will, a Durable Power "
+        "of Attorney for Healthcare, a Do Not Resuscitate (DNR) order, or "
+        "Physician Orders for Life-Sustaining Treatment (POLST).",
+        "You may create, modify, or revoke an advance directive at any "
+        "time, and you'll receive care regardless of whether you have one.",
+        "If you have an existing advance directive, please provide a copy "
+        "so it can be placed in your file; if you don't have one, we'll "
+        "provide information and help creating one if you'd like.",
+        "Our staff are trained to recognize and follow advance directives, "
+        "and will follow your documented wishes to the best of their "
+        "ability, including in an emergency.",
+        "By signing this document, you acknowledge that you have received "
+        "and understand this Advance Directives Policy.",
+    ],
+    "HIPAA / Notice of Privacy Rights": [
+        "We are required by law to protect the privacy of your health "
+        "information, give you this notice of our privacy practices, and "
+        "follow its terms.",
+        "You have the right to: ask us to limit how we use or share your "
+        "information; name someone to act on your behalf; request a list "
+        "of who we've shared your information with; ask us to contact you "
+        "in a specific way; get a copy of your record; ask us to correct "
+        "your record; and get a paper copy of this notice at any time.",
+        "We use and share your health information as needed for your "
+        "treatment, for billing and payment, and for routine healthcare "
+        "operations such as quality monitoring and staff training.",
+        "We may also share your information when required by law, for "
+        "public health and safety reporting (such as suspected abuse or a "
+        "serious safety threat), for organ/tissue donation, with a "
+        "medical examiner, for workers' compensation, or in response to a "
+        "court order or subpoena.",
+        "We will never share your information for marketing, for sale, or "
+        "(in almost all cases) your psychotherapy notes, without your "
+        "written permission — and you may withdraw that permission at "
+        "any time.",
+        "We will notify you promptly if a breach may have compromised "
+        "your information, and we will never retaliate against you for "
+        "raising a privacy concern.",
+        "To raise a concern, contact us at 3519 Parsons Ridge Ln, Duluth, "
+        "GA, (404) 282-2447. You may also file a complaint with the U.S. "
+        "Department of Health & Human Services, Office for Civil Rights "
+        "(200 Independence Avenue SW, Washington, DC 20201; "
+        "1-877-696-6775; www.hhs.gov/ocr/privacy/hipaa/complaints).",
+    ],
+    "Client's Rights & Responsibilities": [
+        "You have the right to be treated with dignity, respect, and "
+        "privacy, and to receive care free from discrimination.",
+        "You have the right to safe, timely care from a qualified "
+        "caregiver, and to know your caregiver's name and qualifications "
+        "before services begin.",
+        "You have the right to be involved in planning your care, to "
+        "refuse care within the limits of the law, and to have your "
+        "information kept confidential under HIPAA.",
+        "You have the right to raise a concern or complaint without fear "
+        "of retaliation, have it addressed promptly, and — if it isn't "
+        "resolved — to contact the Georgia Department of Community Health.",
+        "You have the right to be free from abuse, neglect, and financial "
+        "exploitation, and to request a change of caregiver whenever possible.",
+        "As a client, you're asked to give complete and honest information "
+        "about your health and care needs, and let us know if either changes.",
+        "You're asked to follow your agreed-upon care plan, treat your "
+        "caregiver with respect, and keep your home reasonably safe for "
+        "them to work in — including securing pets and removing hazards.",
+        "You're asked to make timely payment for services, let us know of "
+        "anything that could affect your ability to pay, and give the "
+        "agency reasonable notice if you need to cancel or reschedule a visit.",
+    ],
+}
+
+
+def build_client_onboarding_pdf(title: str) -> bytes:
+    """Build a read-only client intake notice PDF (Welcome Letter, Advanced
+    Directives, HIPAA notice, or Rights & Responsibilities)."""
+    stripped = title.split(" - ", 1)[-1] if " - " in title else title
+    paragraphs = CLIENT_ONBOARDING_BODIES.get(stripped) or [
+        "This document is part of the Sister to Sister, PHCP client intake packet.",
+        "Please contact administration for the full text of this document.",
+    ]
+    return _build_notice_pdf(
+        stripped, paragraphs, "Client intake document — please review.",
+        footer_note="Please review this document as part of your intake packet.",
+    )
