@@ -32,6 +32,7 @@ type DocItem = {
   seq?: number | null;
   is_template?: boolean;
   owner_id?: string | null;
+  locked?: boolean | null;
 };
 
 const CATEGORIES: { key: DocCategory | "all"; label: string; icon: any }[] = [
@@ -73,15 +74,23 @@ export default function Documents() {
   const [formDoc, setFormDoc] = useState<DocItem | null>(null);
   const [showBinder, setShowBinder] = useState(false);
 
-  // Detect fillable docs by title (matches backend SCHEMAS keys)
-  const FILLABLE_TITLES = new Set([
-    "05 - Client's Authorization Form",
-    "09 - Auto Release",
-    "01 - Employment Application",
-    "04 - Direct Deposit Authorization",
-    "10 - Emergency Contact Form",
-  ]);
-  const isFillable = (d: DocItem) => FILLABLE_TITLES.has(d.title);
+  // Whether tapping a document should default to the fill flow. This used
+  // to only match a hardcoded set of 5 titles ("matches backend SCHEMAS
+  // keys" per the old comment) -- but that list only ever covered 5 of the
+  // 19 real fillable AcroForm documents forms.py generates, and it can
+  // never cover a manually-uploaded fillable PDF at all (e.g. an admin
+  // attaching their own form with a custom title, like a nursing skills
+  // checklist). Any document not on that stale list silently fell through
+  // to the read-only PdfViewerModal instead of the actual fill screen --
+  // reported live as "these aren't read only files, these are actual
+  // files that require fillable information." DynamicFormRenderer already
+  // determines real fillability itself via GET /documents/{id}/schema and
+  // shows a graceful "no fillable fields, view as PDF" state (with a real
+  // button now, see below) for a file that genuinely has none -- so the
+  // only thing worth excluding here is a document already completed/
+  // locked (a finished, signed submission), which should always open for
+  // viewing, never for re-filling.
+  const isFillable = (d: DocItem) => !d.locked;
 
   // Push-to-user modal
   const [pushDoc, setPushDoc] = useState<DocItem | null>(null);
@@ -381,8 +390,18 @@ export default function Documents() {
                 )}
                 {!!item.notes && <Text style={styles.docNotes} numberOfLines={2}>{item.notes}</Text>}
               </View>
+              {/* Explicit "View" -- always opens the read-only (stamped/
+                  signable) PDF directly, regardless of whether this document
+                  is also fillable. Decoupled from `open()` so it's a
+                  reliable way to preview a fillable document's source PDF
+                  too, not just a fallback for non-fillable ones. */}
               {hasFile && (
-                <Pressable testID={`view-doc-${item.id}`} onPress={open} hitSlop={10} style={styles.viewBtn}>
+                <Pressable
+                  testID={`view-doc-${item.id}`}
+                  onPress={(e) => { e.stopPropagation(); setViewerDoc(item); }}
+                  hitSlop={10}
+                  style={styles.viewBtn}
+                >
                   <Ionicons name="eye-outline" size={18} color={theme.colors.brandPrimary} />
                 </Pressable>
               )}

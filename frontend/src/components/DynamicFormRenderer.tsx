@@ -732,6 +732,19 @@ export default function DynamicFormRenderer({
               No fillable fields were detected in this PDF.{"\n"}
               View it as a PDF instead.
             </Text>
+            {/* This text used to promise a PDF view with no way to actually
+                get there -- documentId is always available whenever this
+                empty state renders, so wire it to the same nested
+                PdfViewerModal the header's "View Original PDF" button uses. */}
+            {documentId ? (
+              <Pressable
+                testID="dyn-empty-view-pdf"
+                onPress={() => setViewOriginal(true)}
+                style={styles.retryBtn}
+              >
+                <Text style={styles.retryText}>View as PDF</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : (
           <ScrollView
