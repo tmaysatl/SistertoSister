@@ -224,7 +224,8 @@ export function PdfViewerModal({
                 html: `
                   <!doctype html><html><head>
                   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
-                  <style>html,body{margin:0;background:#525659;height:100%;}embed{display:block;width:100%;height:100%;}</style>
+                  <meta name="color-scheme" content="light only">
+                  <style>html,body{margin:0;background:#fff;height:100%;color-scheme:light;}embed{display:block;width:100%;height:100%;}</style>
                   </head><body>
                   <embed type="application/pdf" src="data:application/pdf;base64,${base64}"/>
                   </body></html>`,
