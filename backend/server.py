@@ -25,6 +25,7 @@ from core.db import client, db
 from core.security import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_admin, oauth2_scheme,
+    get_current_user_optional,
 )
 from core import supa_data
 try:
@@ -102,7 +103,21 @@ logger = logging.getLogger(__name__)
 
 # ---------- AUTH ROUTES ----------
 @api.post("/auth/register", response_model=TokenResponse)
-async def register(req: RegisterRequest):
+async def register(
+    req: RegisterRequest,
+    current: Optional[UserPublic] = Depends(get_current_user_optional),
+):
+    # Part K security fix: this endpoint used to accept role="admin" from any
+    # anonymous caller, letting anyone self-issue a valid admin JWT. Only an
+    # already-authenticated admin may create another admin account now;
+    # unauthenticated / non-admin signup still works exactly as before for
+    # every other role (caregiver today, client once that role ships).
+    if req.role == "admin" and (current is None or current.role != "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an existing admin can create another admin account. "
+                   "Log in as an admin and register the new account from there.",
+        )
     existing = await db.users.find_one({"email": req.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -185,8 +200,14 @@ async def list_clients(_: UserPublic = Depends(get_current_user)):
 
 @api.get("/clients/{client_id}", response_model=Client)
 async def get_client(client_id: str, _: UserPublic = Depends(get_current_user)):
-    # Phase 4: source from Supabase Postgres
-    d = await supa_data.get_client(client_id)
+    # Phase 4: source from Supabase Postgres, with a Mongo fallback (Part K,
+    # same pattern as the list endpoint just above) so a Postgres/Supabase
+    # outage doesn't 500 the client detail screen.
+    try:
+        d = await supa_data.get_client(client_id)
+    except Exception as e:
+        logger.warning("client detail: Postgres read failed, falling back to Mongo: %s", e)
+        d = await db.clients.find_one({"id": client_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Client not found")
     return Client(**d)
@@ -417,32 +438,99 @@ async def send_message(req: ChatSendReq,
     return {k: v for k, v in msg.items() if k != "_id"}
 
 
+async def _chat_threads_from_mongo(user_id: str) -> list[dict]:
+    """Part K Mongo fallback for list_dm_threads: same output shape the
+    Postgres CTE produces (other_id/other_name/last_message/last_at/unread/
+    photo_base64/role), built in Python since chat_dms is small per agency."""
+    docs = await db.chat_dms.find(
+        {"$or": [{"from_id": user_id}, {"to_id": user_id}]}, {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+    last_by_other: dict[str, dict] = {}
+    unread_by_other: dict[str, int] = {}
+    for m in docs:
+        other_id = m["to_id"] if m["from_id"] == user_id else m["from_id"]
+        other_name = m["to_name"] if m["from_id"] == user_id else m["from_name"]
+        if other_id not in last_by_other:
+            last_by_other[other_id] = {
+                "other_id": other_id,
+                "other_name": other_name,
+                "last_message": m.get("text", ""),
+                "last_at": m.get("created_at"),
+            }
+        if m["to_id"] == user_id and not m.get("read"):
+            unread_by_other[other_id] = unread_by_other.get(other_id, 0) + 1
+    other_ids = list(last_by_other.keys())
+    profiles = await db.users.find(
+        {"id": {"$in": other_ids}}, {"_id": 0, "id": 1, "photo_base64": 1, "role": 1},
+    ).to_list(len(other_ids) or 1)
+    profile_by_id = {p["id"]: p for p in profiles}
+    result = []
+    for other_id, thread in last_by_other.items():
+        prof = profile_by_id.get(other_id, {})
+        result.append({
+            **thread,
+            "unread": unread_by_other.get(other_id, 0),
+            "photo_base64": prof.get("photo_base64"),
+            "role": prof.get("role"),
+        })
+    result.sort(key=lambda t: t.get("last_at") or "", reverse=True)
+    return result
+
+
 @api.get("/chat/threads")
 async def list_threads(current: UserPublic = Depends(get_current_user)):
     """Return list of conversations with most recent message + unread count."""
     # Slice E: read from Postgres via a single SQL query (photo + role joined in).
-    return await supa_data.list_dm_threads(current.id)
+    # Part K: Mongo fallback so a Postgres/Supabase outage doesn't blank the
+    # whole chat tab.
+    try:
+        return await supa_data.list_dm_threads(current.id)
+    except Exception as e:
+        logger.warning("chat/threads: Postgres read failed, falling back to Mongo: %s", e)
+        return await _chat_threads_from_mongo(current.id)
 
 
 @api.get("/chat/messages")
 async def get_messages(with_user: str = Query(..., alias="with"),
                        current: UserPublic = Depends(get_current_user)):
     # Slice E: read from Postgres; dual-update read-marker (Mongo + PG).
-    msgs = await supa_data.get_dm_conversation(current.id, with_user)
+    # Part K: Mongo fallback for the read, matching chat_dms' own field names
+    # (id/from_id/from_name/to_id/to_name/text/read/created_at) exactly.
+    try:
+        msgs = await supa_data.get_dm_conversation(current.id, with_user)
+    except Exception as e:
+        logger.warning("chat/messages: Postgres read failed, falling back to Mongo: %s", e)
+        msgs = await db.chat_dms.find(
+            {"$or": [
+                {"from_id": current.id, "to_id": with_user},
+                {"from_id": with_user, "to_id": current.id},
+            ]}, {"_id": 0},
+        ).sort("created_at", 1).to_list(500)
     await db.chat_dms.update_many(
         {"to_id": current.id, "from_id": with_user, "read": False},
         {"$set": {"read": True}},
     )
-    await supa_data.mark_dm_read(current.id, with_user)
+    try:
+        await supa_data.mark_dm_read(current.id, with_user)
+    except Exception as e:
+        logger.warning("chat/messages: Postgres read-marker update failed (Mongo already updated): %s", e)
     return msgs
 
 
 @api.get("/chat/contacts")
 async def list_contacts(current: UserPublic = Depends(get_current_user)):
     """For admin: list all caregivers. For caregiver: list all admins."""
-    # Slice E: source from Postgres profiles
+    # Slice E: source from Postgres profiles, with a Mongo fallback (Part K,
+    # same pattern as /caregivers above) so a Postgres/Supabase outage
+    # doesn't empty the chat contact list.
     target_role = "caregiver" if current.role == "admin" else "admin"
-    return await supa_data.list_users_by_role(target_role)
+    try:
+        return await supa_data.list_users_by_role(target_role)
+    except Exception as e:
+        logger.warning("chat/contacts: Postgres list failed, falling back to Mongo: %s", e)
+        return await db.users.find(
+            {"role": target_role}, {"_id": 0, "hashed_password": 0},
+        ).sort("name", 1).to_list(1000)
 
 
 # ---------- AUDIT BINDER PDF ----------
@@ -1208,8 +1296,16 @@ async def get_document_signed_url(doc_id: str,
     Returns 404 if the document is unknown OR if no blob has been uploaded
     yet (e.g., template-only metadata).
     """
-    # Resolve metadata via Postgres first (Slice A territory)
-    meta = await supa_data.get_document_storage_path(doc_id)
+    # Resolve metadata via Postgres first (Slice A territory). Part K: this
+    # used to only fall back to Mongo when Postgres said "not found" (meta
+    # falsy) -- a genuine Postgres/Supabase outage raises an exception
+    # instead of returning None, which slipped past that check and 500'd.
+    # Now both cases route to the same Mongo fallback below.
+    try:
+        meta = await supa_data.get_document_storage_path(doc_id)
+    except Exception as e:
+        logger.warning("document url: Postgres read failed, falling back to Mongo: %s", e)
+        meta = None
     if not meta:
         # Fallback to Mongo if doc not yet in Postgres (legacy uploads pre-Slice-C)
         d = await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_base64": 0})
@@ -1873,9 +1969,15 @@ async def create_assignment(req: AssignmentCreate,
 
 @api.get("/assignments", response_model=List[Assignment])
 async def list_assignments(current: UserPublic = Depends(get_current_user)):
-    # Phase 4: source from Supabase Postgres
+    # Phase 4: source from Supabase Postgres, with a Mongo fallback (Part K)
+    # so a Postgres/Supabase outage doesn't 500 the assignments list.
     cg = current.id if current.role == "caregiver" else None
-    rows = await supa_data.list_assignments(caregiver_id=cg)
+    try:
+        rows = await supa_data.list_assignments(caregiver_id=cg)
+    except Exception as e:
+        logger.warning("assignments: Postgres list failed, falling back to Mongo: %s", e)
+        q = {"caregiver_id": cg} if cg else {}
+        rows = await db.assignments.find(q, {"_id": 0}).to_list(2000)
     return [Assignment(**r) for r in rows]
 
 
@@ -1906,8 +2008,13 @@ async def create_training(req: TrainingCreate, _: UserPublic = Depends(require_a
 
 @api.get("/training", response_model=List[TrainingItem])
 async def list_training(_: UserPublic = Depends(get_current_user)):
-    # Slice H: read from Postgres
-    rows = await supa_data.list_training_all()
+    # Slice H: read from Postgres, with a Mongo fallback (Part K) so a
+    # Postgres/Supabase outage doesn't 500 the training library.
+    try:
+        rows = await supa_data.list_training_all()
+    except Exception as e:
+        logger.warning("training: Postgres list failed, falling back to Mongo: %s", e)
+        rows = await db.training.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [TrainingItem(**r) for r in rows]
 
 
@@ -1942,9 +2049,15 @@ async def list_completions(
     caregiver_id: Optional[str] = None,
     current: UserPublic = Depends(get_current_user),
 ):
-    # Slice H: read from Postgres
+    # Slice H: read from Postgres, with a Mongo fallback (Part K) so a
+    # Postgres/Supabase outage doesn't 500 training-completion tracking.
     cg = current.id if current.role == "caregiver" else caregiver_id
-    rows = await supa_data.list_training_completions(caregiver_id=cg)
+    try:
+        rows = await supa_data.list_training_completions(caregiver_id=cg)
+    except Exception as e:
+        logger.warning("training/completions: Postgres list failed, falling back to Mongo: %s", e)
+        q = {"caregiver_id": cg} if cg else {}
+        rows = await db.training_completions.find(q, {"_id": 0}).sort("completed_at", -1).to_list(2000)
     return [TrainingCompletion(**r) for r in rows]
 
 
@@ -1964,9 +2077,15 @@ async def list_steps(
     caregiver_id: Optional[str] = None,
     current: UserPublic = Depends(get_current_user),
 ):
-    # Slice F: read from Postgres
+    # Slice F: read from Postgres, with a Mongo fallback (Part K) so a
+    # Postgres/Supabase outage doesn't 500 the onboarding checklist.
     cg = current.id if current.role == "caregiver" else caregiver_id
-    rows = await supa_data.list_onboarding_steps(caregiver_id=cg)
+    try:
+        rows = await supa_data.list_onboarding_steps(caregiver_id=cg)
+    except Exception as e:
+        logger.warning("onboarding: Postgres list failed, falling back to Mongo: %s", e)
+        q = {"caregiver_id": cg} if cg else {}
+        rows = await db.onboarding.find(q, {"_id": 0}).sort("created_at", 1).to_list(2000)
     return [OnboardingStep(**r) for r in rows]
 
 
@@ -2086,8 +2205,14 @@ async def share_packet(req: PacketLinkReq,
 @api.get("/packets/{token_str}")
 async def get_packet(token_str: str):
     """Public endpoint: fetch packet metadata + numbered docs (no PDFs)."""
-    # Slice G: read from Postgres
-    pkt = await supa_data.get_packet_by_token(token_str)
+    # Slice G: read from Postgres, with a Mongo fallback (Part K) so a
+    # Postgres/Supabase outage doesn't 404/500 a public packet link that a
+    # client or caregiver received by email/SMS and can't just retry later.
+    try:
+        pkt = await supa_data.get_packet_by_token(token_str)
+    except Exception as e:
+        logger.warning("packet: Postgres read failed, falling back to Mongo: %s", e)
+        pkt = await db.packet_shares.find_one({"token": token_str}, {"_id": 0})
     if not pkt:
         raise HTTPException(404, "Packet not found")
     if not pkt.get("viewed_at"):
@@ -2370,8 +2495,15 @@ async def chat_with_assistant(req: ChatMessageReq,
 
 @api.get("/assistant/history/{session_id}")
 async def chat_history(session_id: str, current: UserPublic = Depends(get_current_user)):
-    # Slice E: read from Postgres
-    return await supa_data.list_chat_messages(session_id, current.id)
+    # Slice E: read from Postgres, with a Mongo fallback (Part K) so a
+    # Postgres/Supabase outage doesn't blank the AI assistant's history.
+    try:
+        return await supa_data.list_chat_messages(session_id, current.id)
+    except Exception as e:
+        logger.warning("assistant/history: Postgres read failed, falling back to Mongo: %s", e)
+        return await db.chat_messages.find(
+            {"session_id": session_id, "user_id": current.id}, {"_id": 0},
+        ).sort("created_at", 1).to_list(500)
 
 
 # ---------- HEALTH ----------

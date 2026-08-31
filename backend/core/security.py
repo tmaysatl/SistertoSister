@@ -18,6 +18,13 @@ from models import UserPublic
 
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/api/auth/login')
+# Same scheme, but never raises when the Authorization header is missing --
+# used where a caller *may* already be logged in (e.g. an admin creating
+# another admin account) without forcing every caller of that endpoint to
+# authenticate (see get_current_user_optional / Part K's /auth/register fix).
+_oauth2_scheme_optional = OAuth2PasswordBearer(
+    tokenUrl='/api/auth/login', auto_error=False,
+)
 
 
 def hash_password(pw: str) -> str:
@@ -106,3 +113,22 @@ def require_admin(current: UserPublic = Depends(get_current_user)) -> UserPublic
     if current.role != 'admin':
         raise HTTPException(status_code=403, detail='Admin only')
     return current
+
+
+async def get_current_user_optional(
+    token: str | None = Depends(_oauth2_scheme_optional),
+) -> UserPublic | None:
+    """Like get_current_user, but returns None instead of raising 401 when no
+    (or an invalid) bearer token is present, instead of making auth mandatory.
+
+    Added in Part K to close the open '/auth/register can self-issue an admin
+    account' hole: the endpoint needs to know 'is the caller already an
+    authenticated admin?' without requiring every caller -- including a brand
+    new caregiver signing up for the first time -- to already hold a token.
+    """
+    if not token:
+        return None
+    user = await _user_from_legacy_jwt(token)
+    if user:
+        return user
+    return await _user_from_supabase_jwt(token)

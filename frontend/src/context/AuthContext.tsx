@@ -37,25 +37,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Phase 6 -> Aug 2026: the Supabase project auto-paused on the free tier,
-  // making Supabase Auth unreachable. Falling back to Legacy JWT as the
-  // default. Users can flip back to Supabase via the toggle pill on the
-  // login screen once the project is resumed. The dual-mode auth verifier
-  // on the backend still accepts either token type — nothing else changes.
-  const [mode, setModeState] = useState<AuthMode>("legacy");
+  // making Supabase Auth unreachable, so this defaulted to Legacy JWT for a
+  // few weeks (see git history / engineering notes for that outage window).
+  // Part K (2026-08-31): confirmed the Supabase project is healthy again --
+  // reverted to the stored/derived default below. The dual-mode auth
+  // verifier on the backend still accepts either token type either way, and
+  // the toggle pill on the login screen still lets a user switch manually
+  // if Supabase ever becomes unreachable again.
+  const [mode, setModeState] = useState<AuthMode>(SUPABASE_CONFIGURED ? "supabase" : "legacy");
 
   // Bootstrap: detect persisted mode + restore Supabase session OR legacy creds.
   useEffect(() => {
     (async () => {
       try {
         const storedMode = (await AsyncStorage.getItem(MODE_KEY)) as AuthMode | null;
-        // Force legacy as the effective mode until the Supabase project is
-        // unpaused (see the header comment on the useState line). We
-        // deliberately IGNORE any previously stored preference during this
-        // outage window — users who previously signed in via Supabase would
-        // otherwise be stuck on the login screen with an unreachable server.
-        // TODO(post-outage): revert to `storedMode ?? (SUPABASE_CONFIGURED ? "supabase" : "legacy")`.
-        void storedMode; // kept for a future toggle re-read
-        const effectiveMode: AuthMode = "legacy";
+        // Part K (2026-08-31): restored to respect the user's stored
+        // preference, falling back to Supabase when configured (or legacy
+        // when it isn't) for a first-run device with no stored preference
+        // yet. This had been hard-forced to "legacy" during the Supabase
+        // free-tier outage documented above; that override is no longer
+        // needed now that the project is healthy again.
+        const effectiveMode: AuthMode = storedMode ?? (SUPABASE_CONFIGURED ? "supabase" : "legacy");
         setModeState(effectiveMode);
 
         if (effectiveMode === "supabase" && SUPABASE_CONFIGURED) {
