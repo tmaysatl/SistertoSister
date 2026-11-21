@@ -25,6 +25,7 @@ export default function IntakeView() {
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     apiGet<Sub>(`/intake/submissions/${id}`)
@@ -34,12 +35,16 @@ export default function IntakeView() {
   }, [id]);
 
   const update = async (patch: { status?: string; admin_notes?: string }) => {
+    setSaving(true);
+    setMsg("Saving…");
     try {
       await apiPatch(`/intake/submissions/${id}`, patch);
       setSub((cur) => (cur ? { ...cur, ...patch } : cur));
       setMsg("Saved");
     } catch {
       setMsg("Couldn't save. Try again.");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -64,7 +69,7 @@ export default function IntakeView() {
           <Text style={s.sectionTitle}>Status</Text>
           <View style={s.chipsRow}>
             {STATUSES.map((st) => (
-              <Pressable key={st} testID={`intake-status-${st}`} onPress={() => update({ status: st })}
+              <Pressable key={st} testID={`intake-status-${st}`} onPress={() => update({ status: st })} disabled={saving}
                          style={[s.chip, sub.status === st && s.chipOn]}>
                 <Text style={[s.chipText, sub.status === st && { color: "#fff" }]}>{st}</Text>
               </Pressable>
@@ -75,8 +80,8 @@ export default function IntakeView() {
           <TextInput testID="intake-notes" value={notes} onChangeText={setNotes} multiline
                      placeholder="Follow-up notes (no card or ID numbers)" placeholderTextColor={theme.colors.muted}
                      style={s.input} />
-          <Pressable testID="intake-save-notes" onPress={() => update({ admin_notes: notes })} style={s.btn}>
-            <Text style={s.btnText}>Save notes</Text>
+          <Pressable testID="intake-save-notes" onPress={() => update({ admin_notes: notes })} disabled={saving} style={[s.btn, saving && { opacity: 0.6 }]}>
+            {saving ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Save notes</Text>}
           </Pressable>
           {msg && <Text style={s.muted}>{msg}</Text>}
 
@@ -108,10 +113,10 @@ const s = StyleSheet.create({
   label: { fontSize: 12, fontWeight: "700", color: theme.colors.onSurface },
   value: { fontSize: 14, color: theme.colors.onSurfaceTertiary },
   chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  chip: { backgroundColor: "#fff", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7, borderWidth: 1, borderColor: theme.colors.border },
+  chip: { backgroundColor: "#fff", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 11, minHeight: 42, justifyContent: "center", borderWidth: 1, borderColor: theme.colors.border },
   chipOn: { backgroundColor: theme.colors.brandPrimary, borderColor: theme.colors.brandPrimary },
   chipText: { fontSize: 12, fontWeight: "600", color: theme.colors.onSurface, textTransform: "capitalize" },
   input: { backgroundColor: "#fff", borderRadius: 10, padding: 12, borderWidth: 1, borderColor: theme.colors.border, minHeight: 72, textAlignVertical: "top", color: theme.colors.onSurface },
-  btn: { backgroundColor: theme.colors.brandPrimary, padding: 12, borderRadius: 10, alignItems: "center" },
+  btn: { backgroundColor: theme.colors.brandPrimary, padding: 14, minHeight: 46, justifyContent: "center", borderRadius: 10, alignItems: "center" },
   btnText: { color: "#fff", fontWeight: "700" },
 });
