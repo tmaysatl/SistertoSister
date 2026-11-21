@@ -1135,7 +1135,11 @@ async def create_supabase_auth_user(
                     "email": email,
                     "password": password,
                     "email_confirm": True,
-                    "user_metadata": {"name": name, "role": role},
+                    "user_metadata": {"name": name},
+                    # app_metadata can only be set server-side (service role),
+                    # so it is the trusted source for the role (see
+                    # scripts/supabase_harden_roles.sql).
+                    "app_metadata": {"role": role},
                 },
             )
             if r.status_code >= 400:
@@ -1262,4 +1266,45 @@ async def supabase_auth_user_exists(email: str) -> bool:
             users = r.json().get("users", [])
             return any(u.get("email", "").lower() == email.lower() for u in users)
     except Exception:
+        return False
+
+
+async def verify_supabase_password(email: str, password: str) -> bool:
+    """True if Supabase Auth accepts this email/password (password grant)."""
+    from .settings import SUPABASE_ANON_KEY
+    if not (SUPABASE_URL and SUPABASE_ANON_KEY):
+        return False
+    try:
+        async with _httpx.AsyncClient(timeout=10) as http:
+            r = await http.post(
+                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                headers={"apikey": SUPABASE_ANON_KEY},
+                json={"email": email, "password": password},
+            )
+            return r.status_code == 200
+    except Exception as e:
+        log.warning("[supa-auth] verify password failed: %s", str(e)[:200])
+        return False
+
+
+async def update_supabase_auth_password(user_id: str, new_password: str) -> bool:
+    """Best-effort: set a new password on the Supabase Auth user."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return False
+    try:
+        async with _httpx.AsyncClient(timeout=15) as http:
+            r = await http.put(
+                f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                },
+                json={"password": new_password},
+            )
+            if r.status_code >= 400:
+                log.warning("[supa-auth] password update %s: %s", user_id, r.status_code)
+                return False
+            return True
+    except Exception as e:
+        log.warning("[supa-auth] password update failed: %s", str(e)[:200])
         return False

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   View, Text, TextInput, Pressable, StyleSheet,
   KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator,
@@ -17,16 +17,6 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // If the user lands on the screen with empty fields, prefill the demo
-  // admin email (does NOT touch the field if they've already typed). Password
-  // is intentionally left blank so users always type the active-mode password
-  // themselves — this avoids the historical bug where a stale autofill
-  // (e.g. the Supabase password while the persisted mode was Legacy) caused
-  // every sign-in to fail with "Incorrect email or password".
-  useEffect(() => {
-    setEmail((prev) => (prev ? prev : "admin@healthguard.com"));
-  }, []);
 
   const toggleMode = async () => {
     const next = mode === "supabase" ? "legacy" : "supabase";
@@ -153,15 +143,6 @@ export default function Login() {
               <Text style={styles.secondaryBtnText}>Create new account</Text>
             </Pressable>
           </Link>
-
-          <View style={styles.hintBox}>
-            <Ionicons name="information-circle-outline" size={16} color={theme.colors.muted} />
-            <Text style={styles.hint}>
-              {mode === "supabase"
-                ? "Supabase: admin@healthguard.com / AdminPassword123!  ·  caregiver@healthguard.com / Caregiver123!"
-                : "Legacy: admin@healthguard.com / Admin@123  ·  caregiver@healthguard.com / Caregiver@123"}
-            </Text>
-          </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
