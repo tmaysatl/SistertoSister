@@ -9,7 +9,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
 import { apiGet } from "@/src/api/client";
-import { theme, HERO_IMAGE, BRAND_NAME, LOGO_URL } from "@/src/theme";
+import { theme, HERO_IMAGE, BRAND_NAME, LOGO_SOURCE } from "@/src/theme";
 
 type Stats = {
   total_clients: number;
@@ -64,7 +64,7 @@ export default function Dashboard() {
           <SafeAreaView edges={["top"]} style={styles.heroSafe}>
             <View style={styles.heroHeader}>
               <View style={styles.heroBrand}>
-                <Image source={{ uri: LOGO_URL }} style={styles.heroLogo} contentFit="contain" />
+                <Image source={LOGO_SOURCE} style={styles.heroLogo} contentFit="contain" />
                 <View>
                   <Text style={styles.heroGreeting}>
                     {user?.role === "admin" ? BRAND_NAME : "Caregiver"}

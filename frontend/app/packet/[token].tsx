@@ -9,7 +9,7 @@ import { useLocalSearchParams } from "expo-router";
 import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { useRef } from "react";
 import { API_BASE } from "@/src/api/client";
-import { theme, BRAND_NAME, LOGO_URL } from "@/src/theme";
+import { theme, BRAND_NAME, LOGO_SOURCE } from "@/src/theme";
 import { PdfViewerModal } from "@/src/components/pdf/PdfViewerModal";
 
 type Doc = { id: string; title: string; seq: number; is_template: boolean };
@@ -82,7 +82,7 @@ export default function PacketView() {
     <SafeAreaView style={styles.root}>
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.hero}>
-          <Image source={{ uri: LOGO_URL }} style={styles.logo} contentFit="contain" />
+          <Image source={LOGO_SOURCE} style={styles.logo} contentFit="contain" />
           <Text style={styles.brand}>{BRAND_NAME}</Text>
           <Text style={styles.welcome}>Welcome, {packet.recipient_name}</Text>
           <Text style={styles.welcomeSub}>
