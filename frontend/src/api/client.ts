@@ -94,3 +94,16 @@ export async function apiPut<T>(path: string, body: any): Promise<T> {
   }
   return res.json();
 }
+
+export async function apiPatch<T>(path: string, body: any): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`PATCH ${path} failed: ${res.status} ${t}`);
+  }
+  return res.json();
+}

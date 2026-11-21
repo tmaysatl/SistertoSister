@@ -89,6 +89,15 @@ export default function Dashboard() {
                 >
                   <Ionicons name="chatbubbles-outline" size={20} color="#fff" />
                 </Pressable>
+                {user?.role === "admin" && (
+                  <Pressable
+                    testID="open-intake-button"
+                    onPress={() => router.push("/intake" as any)}
+                    style={styles.iconBtn}
+                  >
+                    <Ionicons name="clipboard-outline" size={20} color="#fff" />
+                  </Pressable>
+                )}
                 <Pressable
                   testID="change-password-button"
                   onPress={() => router.push("/change-password" as any)}
