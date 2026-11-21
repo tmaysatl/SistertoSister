@@ -144,18 +144,30 @@ async def register(
     return TokenResponse(access_token=token, user=user_public)
 
 
-# --- Login throttling (in-memory, per client IP + email) --------------------
-# Blocks password-guessing: after _LOGIN_MAX_FAILS failed attempts inside
-# _LOGIN_WINDOW_SEC the caller gets HTTP 429 until the window passes.
+# --- Login throttling (in-memory) -------------------------------------------
+# Two independent counters, both must be under their limit:
+#   * per EMAIL (any IP)        -> stops a guesser who rotates IPs / fakes headers
+#   * per (client IP + EMAIL)   -> stops one machine hammering many accounts
+# The IP comes from the RIGHTMOST X-Forwarded-For entry (the one our own proxy
+# appended). Entries to its left are supplied by the caller and can be faked, so
+# they are never trusted.
 _LOGIN_FAILS: Dict[str, List[float]] = {}
-_LOGIN_MAX_FAILS = 8
+_LOGIN_MAX_FAILS_PER_IP = 8
+_LOGIN_MAX_FAILS_PER_EMAIL = 15
 _LOGIN_WINDOW_SEC = 15 * 60
+_LOGIN_MAX_TRACKED = 5000
 
 
-def _login_key(request: Request, email: str) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
-    return f"{ip}|{email.lower().strip()}"
+def _client_ip(request: Request) -> str:
+    parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    if parts:
+        return parts[-1]
+    return request.client.host if request.client else "?"
+
+
+def _login_keys(request: Request, email: str) -> tuple:
+    em = email.lower().strip()
+    return f"email:{em}", f"ip:{_client_ip(request)}|{em}"
 
 
 def _login_recent_fails(key: str) -> List[float]:
@@ -169,20 +181,39 @@ def _login_recent_fails(key: str) -> List[float]:
     return recent
 
 
+def _login_is_blocked(email_key: str, ip_key: str) -> bool:
+    return (
+        len(_login_recent_fails(email_key)) >= _LOGIN_MAX_FAILS_PER_EMAIL
+        or len(_login_recent_fails(ip_key)) >= _LOGIN_MAX_FAILS_PER_IP
+    )
+
+
+def _login_record_failure(email_key: str, ip_key: str) -> None:
+    import time as _t
+    now = _t.time()
+    if len(_LOGIN_FAILS) > _LOGIN_MAX_TRACKED:  # bound memory against random-email floods
+        cutoff = now - _LOGIN_WINDOW_SEC
+        for k in [k for k, v in _LOGIN_FAILS.items() if not v or max(v) <= cutoff]:
+            _LOGIN_FAILS.pop(k, None)
+        if len(_LOGIN_FAILS) > _LOGIN_MAX_TRACKED:
+            _LOGIN_FAILS.clear()
+    _LOGIN_FAILS.setdefault(email_key, []).append(now)
+    _LOGIN_FAILS.setdefault(ip_key, []).append(now)
+
+
 @api.post("/auth/login", response_model=TokenResponse)
 async def login(req: LoginRequest, request: Request):
-    import time as _t
-    key = _login_key(request, req.email)
-    if len(_login_recent_fails(key)) >= _LOGIN_MAX_FAILS:
+    email_key, ip_key = _login_keys(request, req.email)
+    if _login_is_blocked(email_key, ip_key):
         raise HTTPException(
             status_code=429,
             detail="Too many failed sign-in attempts. Please wait 15 minutes and try again.",
         )
     doc = await db.users.find_one({"email": req.email})
     if not doc or not verify_password(req.password, doc["hashed_password"]):
-        _LOGIN_FAILS.setdefault(key, []).append(_t.time())
+        _login_record_failure(email_key, ip_key)
         raise HTTPException(status_code=401, detail="Incorrect email or password")
-    _LOGIN_FAILS.pop(key, None)
+    _LOGIN_FAILS.pop(ip_key, None)
     user_public = UserPublic(
         id=doc["id"], email=doc["email"], name=doc["name"],
         role=doc["role"], created_at=doc["created_at"]
@@ -457,14 +488,17 @@ async def register_push(
             "/api/v1/push/users/register", json=payload
         )
         if resp.status_code == 401:
-            raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
+            # Push service key missing/invalid: push is optional, so don't fail the
+            # app (the phone ignores this call's result); just make it visible in logs.
+            logger.error("register-push: EMERGENT_PUSH_KEY missing or invalid (401 from push service)")
+            return {"status": "push_unavailable"}
         if resp.status_code >= 500:
-            raise HTTPException(502, "Push provider unavailable")
+            logger.warning("register-push: push provider returned %s", resp.status_code)
+            return {"status": "push_unavailable"}
         resp.raise_for_status()
-    except HTTPException:
-        raise
     except Exception as e:
         logger.warning(f"register-push relay failed: {e}")
+        return {"status": "push_unavailable"}
     return {"status": "registered"}
 
 
