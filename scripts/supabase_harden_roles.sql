@@ -47,6 +47,9 @@ begin
 end;
 $$;
 
+-- Trigger functions must not be callable through the public API.
+revoke execute on function public.prevent_role_change_by_users() from public, anon, authenticated;
+
 drop trigger if exists profiles_prevent_role_change on public.profiles;
 create trigger profiles_prevent_role_change
   before update on public.profiles

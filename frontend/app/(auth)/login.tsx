@@ -8,7 +8,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { Link, useRouter } from "expo-router";
 import { useAuth } from "@/src/context/AuthContext";
-import { theme, BRAND_NAME, BRAND_TAGLINE, LOGO_URL } from "@/src/theme";
+import { theme, BRAND_NAME, BRAND_TAGLINE, LOGO_SOURCE } from "@/src/theme";
 
 export default function Login() {
   const { login, mode, setMode } = useAuth();
@@ -71,7 +71,7 @@ export default function Login() {
             />
           </View>
           <View style={styles.heroContent}>
-            <Image source={{ uri: LOGO_URL }} style={styles.logoImg} contentFit="contain" />
+            <Image source={LOGO_SOURCE} style={styles.logoImg} contentFit="contain" />
             <Text style={styles.heroTitle}>{BRAND_NAME}</Text>
             <Text style={styles.heroSubtitle}>{BRAND_TAGLINE}</Text>
           </View>

@@ -47,5 +47,7 @@ export const HERO_IMAGE =
 
 export const BRAND_NAME = "Sister to Sister, PHCP";
 export const BRAND_TAGLINE = "Audit-ready compliance for home health";
+// Bundled copy of the logo (no network needed). LOGO_URL kept only for backwards compatibility.
+export const LOGO_SOURCE = require("../assets/images/logo.png");
 export const LOGO_URL =
   "https://customer-assets.emergentagent.com/job_audit-prep-hub/artifacts/3dundaal_FullLogo_Transparent_NoBuffer_SistertoSisterPHCP.png";
