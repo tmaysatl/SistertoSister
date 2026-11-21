@@ -89,6 +89,13 @@ export default function Dashboard() {
                 >
                   <Ionicons name="chatbubbles-outline" size={20} color="#fff" />
                 </Pressable>
+                <Pressable
+                  testID="change-password-button"
+                  onPress={() => router.push("/change-password" as any)}
+                  style={styles.iconBtn}
+                >
+                  <Ionicons name="key-outline" size={20} color="#fff" />
+                </Pressable>
                 <Pressable testID="logout-button" onPress={logout} style={styles.iconBtn}>
                   <Ionicons name="log-out-outline" size={20} color="#fff" />
                 </Pressable>

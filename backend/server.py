@@ -143,17 +143,82 @@ async def register(
     return TokenResponse(access_token=token, user=user_public)
 
 
+# --- Login throttling (in-memory, per client IP + email) --------------------
+# Blocks password-guessing: after _LOGIN_MAX_FAILS failed attempts inside
+# _LOGIN_WINDOW_SEC the caller gets HTTP 429 until the window passes.
+_LOGIN_FAILS: Dict[str, List[float]] = {}
+_LOGIN_MAX_FAILS = 8
+_LOGIN_WINDOW_SEC = 15 * 60
+
+
+def _login_key(request: Request, email: str) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+    return f"{ip}|{email.lower().strip()}"
+
+
+def _login_recent_fails(key: str) -> List[float]:
+    import time as _t
+    cutoff = _t.time() - _LOGIN_WINDOW_SEC
+    recent = [t for t in _LOGIN_FAILS.get(key, []) if t > cutoff]
+    if recent:
+        _LOGIN_FAILS[key] = recent
+    else:
+        _LOGIN_FAILS.pop(key, None)
+    return recent
+
+
 @api.post("/auth/login", response_model=TokenResponse)
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
+    import time as _t
+    key = _login_key(request, req.email)
+    if len(_login_recent_fails(key)) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed sign-in attempts. Please wait 15 minutes and try again.",
+        )
     doc = await db.users.find_one({"email": req.email})
     if not doc or not verify_password(req.password, doc["hashed_password"]):
+        _LOGIN_FAILS.setdefault(key, []).append(_t.time())
         raise HTTPException(status_code=401, detail="Incorrect email or password")
+    _LOGIN_FAILS.pop(key, None)
     user_public = UserPublic(
         id=doc["id"], email=doc["email"], name=doc["name"],
         role=doc["role"], created_at=doc["created_at"]
     )
     token = create_access_token({"sub": doc["id"], "role": doc["role"]})
     return TokenResponse(access_token=token, user=user_public)
+
+
+class ChangePasswordReq(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=10, max_length=128)
+
+
+@api.post("/auth/change-password")
+async def change_password(
+    req: ChangePasswordReq,
+    current: UserPublic = Depends(get_current_user),
+):
+    """Lets a signed-in user change their own password (both stores).
+
+    Needed so the seeded/default credentials can actually be replaced.
+    """
+    if req.new_password == req.current_password:
+        raise HTTPException(status_code=400, detail="New password must be different.")
+    doc = await db.users.find_one({"id": current.id})
+    ok = bool(doc and verify_password(req.current_password, doc["hashed_password"]))
+    if not ok:
+        ok = await supa_data.verify_supabase_password(current.email, req.current_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    if doc:
+        await db.users.update_one(
+            {"id": current.id},
+            {"$set": {"hashed_password": hash_password(req.new_password)}},
+        )
+    await supa_data.update_supabase_auth_password(current.id, req.new_password)
+    return {"status": "password_changed"}
 
 
 @api.get("/auth/me", response_model=UserPublic)
@@ -378,10 +443,17 @@ class RegisterPushBody(BaseModel):
 
 
 @api.post("/register-push", status_code=201)
-async def register_push(body: RegisterPushBody):
+async def register_push(
+    body: RegisterPushBody,
+    current: UserPublic = Depends(get_current_user),
+):
+    # Security: only the signed-in user may register a device, and always
+    # for themselves -- never trust a user_id supplied in the request body.
+    payload = body.model_dump()
+    payload["user_id"] = current.id
     try:
         resp = await _push_client.post(
-            "/api/v1/push/users/register", json=body.model_dump()
+            "/api/v1/push/users/register", json=payload
         )
         if resp.status_code == 401:
             raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
@@ -2512,14 +2584,45 @@ async def root():
     return {"ok": True, "service": "HealthGuard Compliance API"}
 
 
-# ---------- STARTUP: SEED ADMIN ----------
+# ---------- STARTUP: BOOTSTRAP ADMIN (env-driven, no built-in passwords) ----------
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
 @app.on_event("startup")
 async def seed_admin():
-    """Seed default admin + caregiver in BOTH Mongo and Supabase Auth.
+    """Create the first admin only when explicitly configured.
 
-    Slice I: Supabase users (if missing) are created with the same UUID as
-    the Mongo record so cross-DB foreign keys stay aligned.
+    Production: set BOOTSTRAP_ADMIN_EMAIL + BOOTSTRAP_ADMIN_PASSWORD (+ optional
+    BOOTSTRAP_ADMIN_NAME). If no user with that email exists one admin is
+    created in BOTH Mongo and Supabase Auth with that password.
+
+    Local demos only: SEED_DEMO_USERS=true also creates the old demo admin and
+    caregiver accounts (they use well-known passwords -- never enable this on
+    a real deployment).
     """
+    boot_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+    boot_pw = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
+    if boot_email and boot_pw:
+        if len(boot_pw) < 10:
+            logger.warning("BOOTSTRAP_ADMIN_PASSWORD is shorter than 10 characters; admin not created")
+        elif not await db.users.find_one({"email": boot_email}):
+            uid = str(uuid.uuid4())
+            name = os.environ.get("BOOTSTRAP_ADMIN_NAME", "Agency Admin")
+            await db.users.insert_one({
+                "id": uid, "email": boot_email, "name": name, "role": "admin",
+                "hashed_password": hash_password(boot_pw), "created_at": now_iso(),
+            })
+            logger.info("Bootstrap admin created: %s", boot_email)
+            await supa_data.create_supabase_auth_user(
+                user_id=uid, email=boot_email, password=boot_pw,
+                name=name, role="admin",
+            )
+
+    if not _env_flag("SEED_DEMO_USERS"):
+        return
+
+    logger.warning("SEED_DEMO_USERS is on: creating demo accounts with well-known passwords")
     existing = await db.users.find_one({"email": "admin@healthguard.com"})
     if not existing:
         uid = str(uuid.uuid4())
@@ -2531,17 +2634,10 @@ async def seed_admin():
             "hashed_password": hash_password("Admin@123"),
             "created_at": now_iso(),
         })
-        logger.info("Seeded default admin: admin@healthguard.com / Admin@123")
         await supa_data.create_supabase_auth_user(
             user_id=uid, email="admin@healthguard.com",
             password="AdminPassword123!",
             name="Sister to Sister, PHCP", role="admin",
-        )
-    elif existing.get("name") == "Agency Owner":
-        # Rebrand legacy seeded admin
-        await db.users.update_one(
-            {"email": "admin@healthguard.com"},
-            {"$set": {"name": "Sister to Sister, PHCP"}},
         )
 
     existing_cg = await db.users.find_one({"email": "caregiver@healthguard.com"})
@@ -2555,7 +2651,6 @@ async def seed_admin():
             "hashed_password": hash_password("Caregiver@123"),
             "created_at": now_iso(),
         })
-        logger.info("Seeded default caregiver")
         await supa_data.create_supabase_auth_user(
             user_id=uid, email="caregiver@healthguard.com",
             password="Caregiver123!",
@@ -2571,10 +2666,13 @@ if ms_graph_router is not None:
     app.include_router(ms_graph_router.router, prefix="/api")
 app.include_router(supabase_router.router, prefix="/api")
 
+# Native apps ignore CORS; this only affects browser/web access. Set
+# CORS_ORIGINS="https://app.example.com,https://other.example.com" in production.
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=False,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

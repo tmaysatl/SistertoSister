@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal, View, Text, Pressable, StyleSheet, ActivityIndicator, Platform } from "react-native";
 import { WebView } from "react-native-webview";
+import * as FileSystem from "expo-file-system/legacy";
+import * as IntentLauncher from "expo-intent-launcher";
+import * as Sharing from "expo-sharing";
 import SignatureScreen, { SignatureViewRef } from "react-native-signature-canvas";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -110,6 +113,35 @@ export function PdfViewerModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, path, url, refreshNonce]);
 
+  // Android's WebView cannot render PDFs inline (the <embed> approach used on
+  // iOS shows a blank page), so on Android the PDF is written to the app cache
+  // and handed to the phone's own PDF viewer. Falls back to the share sheet.
+  const openExternally = async () => {
+    if (!base64) return;
+    try {
+      const safe = (title || "document").replace(/[^a-z0-9._-]+/gi, "_").slice(0, 60) || "document";
+      const fileUri = `${FileSystem.cacheDirectory}${safe}.pdf`;
+      await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: FileSystem.EncodingType.Base64 });
+      try {
+        const contentUri = await FileSystem.getContentUriAsync(fileUri);
+        await IntentLauncher.startActivityAsync("android.intent.action.VIEW", {
+          data: contentUri,
+          flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+          type: "application/pdf",
+        });
+      } catch {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(fileUri, { mimeType: "application/pdf", dialogTitle: title });
+        } else {
+          setError("No app on this phone can open PDF files. Install a PDF viewer (for example Google Drive) and try again.");
+        }
+      }
+    } catch (e) {
+      console.log("open pdf externally failed:", e);
+      setError("Couldn't open this document. Tap Try again.");
+    }
+  };
+
   const submitSignature = async (sig: string) => {
     setSubmitting(true);
     try {
@@ -217,7 +249,21 @@ export function PdfViewerModal({
             </View>
           )}
 
-          {Platform.OS !== "web" && base64 && (
+          {Platform.OS === "android" && base64 && !error && (
+            <View style={styles.androidOpen}>
+              <Ionicons name="document-text-outline" size={44} color={theme.colors.brandPrimary} />
+              <Text style={styles.androidOpenTitle}>{title}</Text>
+              <Text style={styles.errorText}>
+                Android opens PDFs in your phone's PDF viewer.
+              </Text>
+              <Pressable testID="pdf-open-external" onPress={openExternally} style={styles.retryBtn}>
+                <Ionicons name="open-outline" size={16} color="#fff" />
+                <Text style={styles.retryBtnText}>Open PDF</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {Platform.OS === "ios" && base64 && (
             <WebView
               originWhitelist={["*"]}
               source={{
@@ -308,6 +354,8 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center", gap: 10, padding: 24,
     backgroundColor: theme.colors.surface,
   },
+  androidOpen: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 },
+  androidOpenTitle: { fontSize: 15, fontWeight: "700", color: theme.colors.onSurface, textAlign: "center" },
   errorText: { color: theme.colors.muted, fontSize: 13, textAlign: "center" },
   retryBtn: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10, backgroundColor: theme.colors.brandPrimary },
   retryBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },

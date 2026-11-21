@@ -14,7 +14,7 @@ export default function Register() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<Role>("admin");
+  const [role, setRole] = useState<Role>("caregiver");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,7 +88,7 @@ export default function Register() {
           <View style={styles.field}>
             <Text style={styles.label}>Role</Text>
             <View style={styles.roleRow}>
-              {(["admin", "caregiver"] as Role[]).map((r) => (
+              {(["caregiver"] as Role[]).map((r) => (
                 <Pressable
                   key={r}
                   testID={`register-role-${r}`}

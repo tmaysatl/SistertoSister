@@ -48,3 +48,16 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+## Android release build (EAS)
+
+Set these as EAS environment variables (or secrets) for the `preview` and `production` profiles **before** building.
+They are baked into the app at build time; without them the app cannot reach the backend or Supabase:
+
+- `EXPO_PUBLIC_BACKEND_URL` – the **published** backend URL (not the Emergent preview URL)
+- `EXPO_PUBLIC_SUPABASE_URL`
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY`
+
+Then: `eas build -p android --profile preview` (installable APK for testing) and
+`eas build -p android --profile production` (AAB for Google Play).
+The Android package name `com.sistertosister.compliance` is permanent once published.

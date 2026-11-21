@@ -126,7 +126,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const tokenResp = await Notifications.getDevicePushTokenAsync();
           await fetch(`${API_BASE}/register-push`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
             body: JSON.stringify({ user_id: u.id, platform: Platform.OS, device_token: tokenResp.data }),
           });
         }
@@ -178,7 +178,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { name, role } },
+        options: { data: { name } },
       });
       if (error) throw new Error(error.message);
       if (data.session?.access_token) {
