@@ -65,14 +65,14 @@ export default function Dashboard() {
             <View style={styles.heroHeader}>
               <View style={styles.heroBrand}>
                 <Image source={LOGO_SOURCE} style={styles.heroLogo} contentFit="contain" />
-                <View>
-                  <Text style={styles.heroGreeting}>
+                <View style={{ flexShrink: 1 }}>
+                  <Text style={styles.heroGreeting} numberOfLines={1}>
                     {user?.role === "admin" ? BRAND_NAME : "Caregiver"}
                   </Text>
-                  <Text style={styles.heroName}>{user?.name}</Text>
+                  <Text style={styles.heroName} numberOfLines={1}>{user?.name}</Text>
                 </View>
               </View>
-              <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 6, flexShrink: 0 }}>
                 {user?.role === "caregiver" && (
                   <Pressable
                     testID="open-my-profile"
@@ -238,12 +238,12 @@ const styles = StyleSheet.create({
   hero: { ...StyleSheet.absoluteFillObject },
   heroSafe: { flex: 1, paddingHorizontal: 20, paddingTop: 8, justifyContent: "space-between" },
   heroHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  heroBrand: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
-  heroLogo: { width: 48, height: 48 },
+  heroBrand: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1, minWidth: 0, marginRight: 8 },
+  heroLogo: { width: 44, height: 44 },
   heroGreeting: { color: "rgba(255,255,255,0.7)", fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 1 },
   heroName: { color: "#fff", fontSize: 22, fontWeight: "700", marginTop: 2 },
   iconBtn: {
-    width: 38, height: 38, borderRadius: 19,
+    width: 36, height: 36, borderRadius: 18,
     backgroundColor: "rgba(255,255,255,0.18)",
     alignItems: "center", justifyContent: "center",
   },
