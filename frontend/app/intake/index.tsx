@@ -9,7 +9,7 @@ import { STATUSES } from "@/src/components/intake/intakeTypes";
 
 type Row = {
   id: string; form_key: string; form_title: string; summary: string;
-  status: string; submitted_at: string; submitted_by_name?: string;
+  status: string; submitted_at: string; submitted_by_name?: string; source?: string;
 };
 
 const NEW_FORMS: { key: string; label: string; icon: any }[] = [
@@ -90,7 +90,7 @@ export default function IntakeHome() {
               <View style={{ flex: 1 }}>
                 <Text style={s.rowTitle} numberOfLines={1}>{r.summary}</Text>
                 <Text style={s.rowSub} numberOfLines={1}>
-                  {r.form_title} · {r.submitted_at.slice(0, 10)}
+                  {r.form_title} · {r.submitted_at.slice(0, 10)}{r.source === "website" ? " · website" : ""}
                 </Text>
               </View>
               <Text style={[s.badge, r.status === "new" && s.badgeNew]}>{r.status}</Text>

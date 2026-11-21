@@ -12,12 +12,16 @@ to enter / review the same information in the app.
 
 Mounted under `/api` by server.py.
 """
+import hmac
 import logging
+import os
 import re
+import time
 import uuid
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from core.db import db
@@ -404,6 +408,7 @@ async def create_submission(req: SubmitReq, current: UserPublic = Depends(requir
         "values": values,
         "status": "new",
         "admin_notes": "",
+        "source": "app",
         "submitted_by": current.id,
         "submitted_by_name": current.name,
         "submitted_at": now_iso(),
@@ -455,3 +460,114 @@ async def update_submission(sub_id: str, req: UpdateReq, current: UserPublic = D
     if res.matched_count == 0:
         raise HTTPException(404, "Submission not found")
     return {"id": sub_id, **patch}
+
+
+# --------------------------------------------------------------------------
+# Inbound webhook: lets the public website (or a GoHighLevel workflow) push its
+# form submissions into the same list. Protected by a shared secret header,
+# disabled unless INTAKE_WEBHOOK_KEY is set, and rate limited per client IP.
+#
+#   POST /api/intake/inbound/{form_key}      header: X-Intake-Key: <secret>
+#   body: JSON object of {field_key: value}  (unknown keys are ignored)
+#
+# Lenient by design: the website already validated the visitor's answers, so a
+# slightly different choice label must not make us drop a real lead. We keep
+# what we recognise, trim it, and mask any card/SSN-like number instead of
+# rejecting the whole submission.
+# --------------------------------------------------------------------------
+_INBOUND_WINDOW_S = 60
+_INBOUND_MAX_PER_WINDOW = 30
+_INBOUND_MAX_BODY = 64 * 1024
+_inbound_hits: Dict[str, deque] = defaultdict(deque)
+
+
+def _inbound_ip(request: Request) -> str:
+    # Rightmost X-Forwarded-For entry is the one appended by our own proxy;
+    # earlier entries can be forged by the caller.
+    xff = request.headers.get("x-forwarded-for", "")
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    if parts:
+        return parts[-1]
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    q = _inbound_hits[ip]
+    while q and now - q[0] > _INBOUND_WINDOW_S:
+        q.popleft()
+    if len(q) >= _INBOUND_MAX_PER_WINDOW:
+        return True
+    q.append(now)
+    if len(_inbound_hits) > 5000:  # keep memory bounded
+        for k in [k for k, v in _inbound_hits.items() if not v or now - v[-1] > _INBOUND_WINDOW_S]:
+            _inbound_hits.pop(k, None)
+    return False
+
+
+def _mask(s: str) -> str:
+    return _SSN_RE.sub("[removed]", _CARD_RE.sub("[removed]", s))
+
+
+def clean_inbound(form_key: str, raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Allow-list + coerce without rejecting (see note above)."""
+    out: Dict[str, Any] = {}
+    for section in FORMS[form_key]["sections"]:
+        for f in section["fields"]:
+            key, ftype = f["key"], f["type"]
+            if key not in raw:
+                continue
+            v = raw[key]
+            if ftype == "consent":
+                out[key] = v is True or str(v).strip().lower() in ("true", "yes", "1", "on")
+            elif ftype == "checkbox":
+                if isinstance(v, str):
+                    v = [x.strip() for x in v.split(",") if x.strip()]
+                arr = v if isinstance(v, list) else []
+                out[key] = [_mask(str(x))[:200] for x in arr[:30]]
+            else:
+                out[key] = _mask(str(v).strip())[:MAX_TEXT] if v is not None else ""
+    return out
+
+
+@router.post("/intake/inbound/{form_key}")
+async def inbound_submission(form_key: str, request: Request):
+    expected = os.environ.get("INTAKE_WEBHOOK_KEY", "")
+    if not expected:
+        raise HTTPException(404, "Not found")  # feature off until a key is configured
+    ip = _inbound_ip(request)
+    if _rate_limited(ip):
+        raise HTTPException(429, "Too many requests")
+    supplied = request.headers.get("x-intake-key", "")
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(401, "Invalid key")
+    if form_key not in FORMS:
+        raise HTTPException(404, "Unknown form")
+    body = await request.body()
+    if len(body) > _INBOUND_MAX_BODY:
+        raise HTTPException(413, "Payload too large")
+    try:
+        import json
+        raw = json.loads(body or b"{}")
+    except ValueError:
+        raise HTTPException(400, "Body must be JSON")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    values = clean_inbound(form_key, raw)
+    form = FORMS[form_key]
+    doc = {
+        "id": str(uuid.uuid4()),
+        "form_key": form_key,
+        "form_title": form["title"],
+        "summary": values.get(form["summary_key"], "") or "(no name)",
+        "values": values,
+        "status": "new",
+        "admin_notes": "",
+        "source": "website",
+        "submitted_by": None,
+        "submitted_by_name": "Website",
+        "submitted_at": now_iso(),
+    }
+    await db.intake_submissions.insert_one(dict(doc))
+    logger.info("intake: inbound %s accepted from website", form_key)
+    return {"id": doc["id"], "status": "new"}
